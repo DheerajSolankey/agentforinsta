@@ -1,0 +1,20 @@
+{
+  "name": "instagram-agent",
+  "version": "1.0.0",
+  "description": "Instagram posting agent for couplesexposition.com",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "scrape": "node src/scraper.js",
+    "post": "node src/publisher.js",
+    "test": "node src/test.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.0",
+    "node-cron": "^3.0.3",
+    "sharp": "^0.35.2"
+  }
+}
