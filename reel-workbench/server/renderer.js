@@ -120,8 +120,23 @@ export function buildEffectFilter(clip) {
     case 'noir': return 'hue=s=0,eq=contrast=1.28:brightness=-0.02';
     case 'neon': return 'eq=contrast=1.15:saturation=1.55:gamma=1.04,hue=h=8';
     case 'luxury': return 'eq=contrast=1.12:saturation=1.05:gamma_r=1.06:gamma_b=0.94,colorbalance=rs=0.06:bs=-0.04';
+    case 'vignette': return 'vignette=angle=PI/5';
+    case 'soft': return 'gblur=sigma=1.35';
     default: return '';
   }
+}
+
+/**
+ * FFmpeg rotate filter for clip rotation (deg) with optional keyframes.
+ * Applied after fit so rotation is in pane space. Empty when identity.
+ */
+export function buildRotateFilter(clip) {
+  const { rotate } = normalizeTransform(clip || {});
+  const kf = clip?.keyframes?.rotate;
+  const hasKf = Array.isArray(kf) && kf.length > 0;
+  if (!hasKf && Math.abs(rotate) < 1e-6) return '';
+  const expr = hasKf ? keyframeExpr(kf, rotate, 0) : String(rotate);
+  return `rotate=a='(${expr})*PI/180':ow=iw:oh=ih:fillcolor=black`;
 }
 
 /**
@@ -138,6 +153,16 @@ export function buildTextAlpha(anim, start, end, animDur = 0.3) {
   if (e <= s + d) return null;
   if (a === 'fade') {
     return `if(lt(t,${s}),0,if(lt(t,${round3(s + d)}),(t-${s})/${d},if(lt(t,${round3(e - d)}),1,(${e}-t)/${d})))`;
+  }
+  if (a === 'flicker') {
+    // Stepped blink every ~0.14s during entrance, then solid, gentle out.
+    const dOut = Math.min(d, 0.18);
+    if (e <= s + d + dOut) return null;
+    const period = 0.14;
+    const half = round3(period / 2);
+    return `if(lt(t,${s}),0,if(lt(t,${round3(s + d)}),`
+      + `if(lt(mod(t-${s},${period}),${half}),0,1),`
+      + `if(lt(t,${round3(e - dOut)}),1,(${e}-t)/${dOut})))`;
   }
   // pop / bounce / zoom-in / slide: snap-in with ease, gentle out
   const dIn = Math.min(d, a === 'pop' ? 0.18 : a === 'bounce' ? 0.22 : a === 'zoom-in' ? 0.2 : 0.25);
@@ -414,6 +439,7 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
       const speed = Number(clip.speed) > 0 ? Number(clip.speed) : 1;
       const srcDur = Math.max(0.05, clip.duration * speed);
       const fit = buildFitFilter(clip, pw, ph);
+      const rot = buildRotateFilter(clip);
       const fx = buildEffectFilter(clip);
       const opacityKfs = clip.keyframes?.opacity;
       const tr = normalizeTransition(clip.transitionIn);
@@ -427,10 +453,10 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
         else if (tr === 'fade' || tr === 'dip') alpha = `,fade=t=in:st=0:d=${d}`;
         else if (tr === 'zoom' || tr === 'slide') alpha = `,fade=t=in:st=0:d=0.15`;
       }
-      // Order: fit → effect → setpts (speed) → opacity/transition → fps/format.
+      // Order: fit → rotate → effect → setpts (speed) → opacity/transition → fps/format.
       const mid = [];
       if (clip.kind !== 'image' && speed !== 1) mid.push(`setpts=PTS/${speed}`);
-      const chain = [fit, fx, ...mid].filter(Boolean).join(',') + alpha;
+      const chain = [fit, rot, fx, ...mid].filter(Boolean).join(',') + alpha;
       const vf = `${chain},fps=${FPS},setsar=1,format=yuv420p`;
       const args =
         clip.kind === 'image'
@@ -897,7 +923,7 @@ export async function frameAt(projectId, seconds, outFile) {
       const path = mediaAbsolutePath(asset);
       await run(resolveFfmpeg(settings), [
         '-y', '-ss', String(at), '-i', path, '-frames:v', '1',
-        '-vf', [buildFitFilter(clip, 1080, 1920), buildEffectFilter(clip)].filter(Boolean).join(','),
+        '-vf', [buildFitFilter(clip, 1080, 1920), buildRotateFilter(clip), buildEffectFilter(clip)].filter(Boolean).join(','),
         '-q:v', '4', outFile,
       ], { timeoutMs: 30000 });
       return outFile;

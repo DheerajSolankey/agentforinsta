@@ -217,6 +217,8 @@ function effectFromStyleVisual(visual) {
   if (!visual) return null;
   if (visual.preset === 'dark') return 'cool';
   if (visual.preset === 'luxury') return 'luxury';
+  if (visual.preset === 'vignette' || visual.vignette) return 'vignette';
+  if (visual.preset === 'soft' || visual.softFocus) return 'soft';
   const con = visual.contrast;
   const sat = visual.saturation;
   if (con === 'high' && sat === 'high') return 'vivid';

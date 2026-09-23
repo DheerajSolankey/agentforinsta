@@ -532,6 +532,32 @@ pre.code {
   from { opacity: 0; transform: translate(-50%, -50%) scale(0.55); }
   to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
+@keyframes txt-flicker {
+  0% { opacity: 0; }
+  8% { opacity: 1; }
+  16% { opacity: 0; }
+  24% { opacity: 1; }
+  32% { opacity: 0; }
+  40% { opacity: 1; }
+  48% { opacity: 0; }
+  56% { opacity: 1; }
+  64% { opacity: 0; }
+  72% { opacity: 1; }
+  80% { opacity: 0.4; }
+  88% { opacity: 1; }
+  100% { opacity: 1; }
+}
+/* Cinematic vignette layer over preview media (matches FFmpeg vignette). */
+.preview-frame .vignette-layer {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 48%, rgba(0,0,0,0.55) 100%);
+  z-index: 4;
+}
+.preview-frame .vignette-layer.hidden { display: none; }
+.overlay-layer .fx-vignette {
+  box-shadow: inset 0 0 40px 18px rgba(0,0,0,0.55);
+}
 .style-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
 .style-presets .btn { font-size: 11px; }
 .safe-guides { position: absolute; inset: 0; pointer-events: none; }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildProgramSegments, overlayClipsOf, textClipsOf, audioClipsOf,
   videoClipAudios, buildSrt, validateForRender, RenderError, atempoChain,
-  splitPaneClipsOf, buildFitFilter, buildEffectFilter,
+  splitPaneClipsOf, buildFitFilter, buildEffectFilter, buildRotateFilter,
   buildTextAlpha, buildTextX, buildTextY,
 } from '../server/renderer.js';
 import { createTimeline, addClip, timelineDuration, round3, setLayoutMode } from '../shared/timeline-ops.js';
@@ -170,6 +170,16 @@ test('buildEffectFilter: bw / none / vivid / looks', () => {
   assert.ok(buildEffectFilter({ effect: 'noir' }).includes('hue=s=0'));
   assert.ok(buildEffectFilter({ effect: 'neon' }).includes('saturation=1.55'));
   assert.ok(buildEffectFilter({ effect: 'luxury' }).includes('gamma_r'));
+  assert.ok(buildEffectFilter({ effect: 'vignette' }).includes('vignette'));
+  assert.ok(buildEffectFilter({ effect: 'soft' }).includes('gblur'));
+
+  // rotate: identity → empty; static and keyframed emit rotate filter
+  assert.equal(buildRotateFilter({}), '');
+  assert.equal(buildRotateFilter({ rotate: 0 }), '');
+  const rot = buildRotateFilter({ rotate: 90 });
+  assert.ok(rot.includes('rotate=a=') && rot.includes('PI/180'));
+  const rotKf = buildRotateFilter({ rotate: 0, keyframes: { rotate: [{ t: 0, v: 0 }, { t: 2, v: 360 }] } });
+  assert.ok(rotKf.includes('rotate=a=') && rotKf.includes('if(lt('));
 });
 
 test('buildTextAlpha / buildTextX / buildTextY for premium text', () => {
@@ -182,6 +192,8 @@ test('buildTextAlpha / buildTextX / buildTextY for premium text', () => {
   assert.ok(typeof buildTextAlpha('slide-up', 0, 2, 0.3) === 'string');
   assert.ok(typeof buildTextAlpha('bounce', 0, 2, 0.3) === 'string');
   assert.ok(typeof buildTextAlpha('zoom-in', 0, 2, 0.3) === 'string');
+  const flicker = buildTextAlpha('flicker', 0, 2, 0.45);
+  assert.ok(typeof flicker === 'string' && flicker.includes('mod('));
 
   const ySlide = buildTextY('slide-up', 0, 0.3, '(h-text_h)*50/100');
   assert.ok(ySlide.includes('+48*max'));

@@ -46,6 +46,7 @@ const S = {
   renderResult: null,
   loop: null, // {start, end} | null
   previewFrame: null,
+  vignetteLayer: null,
   previewBadges: null,
   previewEmpty: null,
   selBox: null,
@@ -302,6 +303,7 @@ function buildUi(root) {
     el('div', { text: 'Drag a clip onto the top timeline row (V1), or move the red line over a clip. Click a timeline clip to edit it.' })
   );
   const badges = el('div', { class: 'preview-badges', id: 'previewBadges' });
+  const vignette = el('div', { class: 'vignette-layer hidden', id: 'vignetteLayer', 'aria-hidden': 'true' });
   const selBox = el('div', { class: 'sel-box', id: 'selBox' },
     el('div', { class: 'sh-label', text: '' }),
     ...['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((h) => el('div', { class: `sh ${h}`, dataset: { h } }))
@@ -310,7 +312,7 @@ function buildUi(root) {
     el('div', { class: 'sg-v' }),
     el('div', { class: 'sg-h' })
   );
-  const frame = el('div', { class: 'preview-frame' }, video, img, video2, img2, overlayLayer, textLayer, guides, emptyState, badges, snapGuides, selBox);
+  const frame = el('div', { class: 'preview-frame' }, video, img, video2, img2, overlayLayer, textLayer, vignette, guides, emptyState, badges, snapGuides, selBox);
   S.videoEl = video;
   S.imgEl = img;
   S.videoEl2 = video2;
@@ -319,6 +321,7 @@ function buildUi(root) {
   S.previewFrame = frame;
   S.previewBadges = badges;
   S.previewEmpty = emptyState;
+  S.vignetteLayer = vignette;
   S.selBox = selBox;
   S.snapGuides = snapGuides;
   bindSelBox(selBox);
@@ -406,6 +409,14 @@ function buildUi(root) {
       onclick: () => quickEffect('luxury'),
     }),
     el('button', {
+      class: 'btn sm qs-btn', text: '◌ Vignette', title: 'Darken edges for cinematic focus',
+      onclick: () => quickEffect('vignette'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '☁ Soft', title: 'Soft focus / gentle gaussian blur',
+      onclick: () => quickEffect('soft'),
+    }),
+    el('button', {
       class: 'btn sm qs-btn', text: '◻ Fit', title: 'No crop — letterbox video to fit',
       onclick: () => quickFit('contain'),
     }),
@@ -431,6 +442,14 @@ function buildUi(root) {
       class: 'btn sm qs-btn', text: '🎞 Ken Burns', title: 'Slow pan across the frame',
       onclick: () => applyMotionPreset('kenburns'),
     }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '↻ Spin', title: 'Rotate 360° over the clip (smooth ease)',
+      onclick: () => applyMotionPreset('spin'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '〰 Float', title: 'Gentle vertical float bob',
+      onclick: () => applyMotionPreset('float'),
+    }),
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Text' }),
     el('button', {
@@ -452,6 +471,10 @@ function buildUi(root) {
     el('button', {
       class: 'btn sm qs-btn', text: 'Zoom-in', title: 'Text zooms in from small',
       onclick: () => quickTextAnim('zoom-in'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '⚡ Flicker', title: 'Strobe/flicker entrance for titles',
+      onclick: () => quickTextAnim('flicker'),
     }),
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Layout' }),
@@ -770,6 +793,7 @@ function applyClipTransform(el, clip) {
     el.style.transform = '';
     el.style.filter = '';
     el.style.opacity = '';
+    el.classList.remove('fx-vignette');
     return;
   }
   const base = normalizeTransform(clip);
@@ -777,15 +801,33 @@ function applyClipTransform(el, clip) {
   const scale = evalKeyframes(clip, localT, 'scale', base.scale);
   const posX = evalKeyframes(clip, localT, 'posX', base.posX);
   const posY = evalKeyframes(clip, localT, 'posY', base.posY);
+  const rotate = evalKeyframes(clip, localT, 'rotate', base.rotate);
   const opacityKf = evalKeyframes(clip, localT, 'opacity', 1);
   const trGain = transitionGain(clip, localT);
+  const fx = effectToCssFilter(clip?.effect);
   el.style.objectFit = base.fit;
   el.style.objectPosition = `${posX}% ${posY}%`;
   el.style.transformOrigin = `${posX}% ${posY}%`;
-  el.style.transform = Math.abs(scale - 1) < 1e-6 ? '' : `scale(${scale})`;
-  el.style.filter = effectToCssFilter(clip?.effect);
+  const xf = [];
+  if (Math.abs(scale - 1) > 1e-6) xf.push(`scale(${scale})`);
+  if (Math.abs(rotate) > 1e-6) xf.push(`rotate(${rotate}deg)`);
+  el.style.transform = xf.join(' ');
+  el.style.filter = fx;
+  el.classList.toggle('fx-vignette', normalizeEffect(clip?.effect) === 'vignette');
   const op = Math.max(0, Math.min(1, opacityKf * trGain));
   el.style.opacity = op >= 0.999 ? '' : String(op);
+}
+
+/** Show/hide frame-level vignette when any active media uses the vignette look. */
+function syncVignetteLayer() {
+  const layer = S.vignetteLayer;
+  if (!layer || !S.timeline) return;
+  const t = S.playhead;
+  let on = false;
+  for (const { clip } of activeClips(S.timeline, t, ['video', 'image'])) {
+    if (normalizeEffect(clip.effect) === 'vignette') { on = true; break; }
+  }
+  layer.classList.toggle('hidden', !on);
 }
 
 /** Collect floating overlay clips (v2 always; v3 only when not split) active at t. */
@@ -831,6 +873,7 @@ function syncOverlays() {
       n.style.width = `${ov.widthPct}%`;
       n.style.opacity = op >= 0.999 ? '' : String(op);
       n.style.filter = effectToCssFilter(clip.effect);
+      n.classList.toggle('fx-vignette', normalizeEffect(clip.effect) === 'vignette');
       n.classList.toggle('hidden', op <= 0.001);
     };
     if (!node) {
@@ -1734,6 +1777,7 @@ function effectToCssFilter(effect) {
     case 'noir': return 'grayscale(1) contrast(1.28) brightness(0.98)';
     case 'neon': return 'contrast(1.15) saturate(1.55) hue-rotate(8deg)';
     case 'luxury': return 'contrast(1.12) saturate(1.05) sepia(0.12) brightness(1.02)';
+    case 'soft': return 'blur(1.35px)';
     default: return '';
   }
 }
@@ -2529,7 +2573,7 @@ function quickFit(fit) {
   const { track, clip } = found;
   selectOnly(track.id, clip.id);
   quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
-    fit, scale: 1, posX: 50, posY: 50,
+    fit, scale: 1, posX: 50, posY: 50, rotate: 0,
   }));
   toast(fit === 'contain' ? 'Fit mode: Contain (no crop)' : `Fit mode: ${fit}`);
 }
@@ -2540,12 +2584,12 @@ function quickResetLook() {
   const { track, clip } = found;
   selectOnly(track.id, clip.id);
   quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
-    fit: 'cover', scale: 1, posX: 50, posY: 50, effect: 'none',
+    fit: 'cover', scale: 1, posX: 50, posY: 50, rotate: 0, effect: 'none',
   }));
-  toast('Look reset (fit, zoom, focus, effect)');
+  toast('Look reset (fit, zoom, focus, rotate, effect)');
 }
 
-/** One-click camera motion via scale/pos keyframes on selected media. */
+/** One-click camera motion via scale/pos/rotate keyframes on selected media. */
 function applyMotionPreset(name) {
   const found = selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
   if (!found) { toast('Add a video/image clip first', true); return; }
@@ -2555,26 +2599,35 @@ function applyMotionPreset(name) {
   const end = round3(dur);
   const mid = round3(dur * 0.5);
   let keyframes = {};
-  let extra = {};
   if (name === 'push-in') {
-    keyframes = { scale: [{ t: 0, v: 1 }, { t: end, v: 1.08 }], posX: [{ t: 0, v: 50 }, { t: end, v: 50 }], posY: [{ t: 0, v: 50 }, { t: end, v: 50 }] };
+    keyframes = { scale: [{ t: 0, v: 1, ease: 'ease' }, { t: end, v: 1.08 }] };
   } else if (name === 'punch') {
-    keyframes = { scale: [{ t: 0, v: 1.2 }, { t: Math.min(0.35, dur * 0.35), v: 1 }, { t: end, v: 1.04 }] };
+    keyframes = { scale: [{ t: 0, v: 1.2, ease: 'out' }, { t: Math.min(0.35, dur * 0.35), v: 1, ease: 'ease' }, { t: end, v: 1.04 }] };
   } else if (name === 'reveal') {
-    keyframes = { scale: [{ t: 0, v: 1.25 }, { t: end, v: 1 }] };
+    keyframes = { scale: [{ t: 0, v: 1.25, ease: 'ease' }, { t: end, v: 1 }] };
   } else if (name === 'kenburns') {
     keyframes = {
       scale: [{ t: 0, v: 1.08 }, { t: end, v: 1.08 }],
-      posX: [{ t: 0, v: 44 }, { t: end, v: 56 }],
-      posY: [{ t: 0, v: 50 }, { t: mid, v: 48 }, { t: end, v: 50 }],
+      posX: [{ t: 0, v: 44, ease: 'ease' }, { t: end, v: 56 }],
+      posY: [{ t: 0, v: 50, ease: 'ease' }, { t: mid, v: 48, ease: 'ease' }, { t: end, v: 50 }],
+    };
+  } else if (name === 'spin') {
+    keyframes = { rotate: [{ t: 0, v: 0, ease: 'ease' }, { t: end, v: 360 }] };
+  } else if (name === 'float') {
+    keyframes = {
+      posY: [{ t: 0, v: 50, ease: 'ease' }, { t: mid, v: 46, ease: 'ease' }, { t: end, v: 50 }],
+      scale: [{ t: 0, v: 1.04, ease: 'ease' }, { t: end, v: 1.04 }],
     };
   } else {
     toast('Unknown motion preset', true);
     return;
   }
-  extra.keyframes = { ...(clip.keyframes || {}), ...keyframes };
+  const extra = { keyframes: { ...(clip.keyframes || {}), ...keyframes } };
   quickCommit(() => setClipProps(S.timeline, track.id, clip.id, extra));
-  const labels = { 'push-in': 'Slow push-in', punch: 'Punch-in', reveal: 'Zoom-out reveal', kenburns: 'Ken Burns pan' };
+  const labels = {
+    'push-in': 'Slow push-in', punch: 'Punch-in', reveal: 'Zoom-out reveal',
+    kenburns: 'Ken Burns pan', spin: 'Spin 360°', float: 'Float',
+  };
   toast(`Motion: ${labels[name] || name}`);
 }
 
@@ -2584,9 +2637,12 @@ function quickTextAnim(anim) {
   if (!found) { toast('Could not add text clip', true); return; }
   const { track, clip } = found;
   quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
-    text: { ...(clip.text || {}), anim, animDur: anim === 'fade' ? 0.3 : 0.35 },
+    text: { ...(clip.text || {}), anim, animDur: anim === 'fade' ? 0.3 : anim === 'flicker' ? 0.45 : 0.35 },
   }));
-  const labels = { fade: 'Fade', pop: 'Pop', 'slide-up': 'Slide up', 'slide-down': 'Slide down', bounce: 'Bounce', 'zoom-in': 'Zoom in' };
+  const labels = {
+    fade: 'Fade', pop: 'Pop', 'slide-up': 'Slide up', 'slide-down': 'Slide down',
+    bounce: 'Bounce', 'zoom-in': 'Zoom in', flicker: 'Flicker',
+  };
   toast(`Text animation: ${labels[anim] || anim}`);
 }
 
@@ -2623,6 +2679,7 @@ function quickPip(corner = 'br') {
       scale: clip.scale ?? 1,
       posX: clip.posX ?? 50,
       posY: clip.posY ?? 50,
+      rotate: clip.rotate ?? 0,
       transitionIn: clip.transitionIn || 'none',
       fadeIn: clip.fadeIn || 0,
       fadeOut: clip.fadeOut || 0,
@@ -2645,6 +2702,7 @@ function currentKfValue(clip, prop, localT) {
   if (prop === 'scale') return evalKeyframes(clip, localT, 'scale', base.scale);
   if (prop === 'posX') return evalKeyframes(clip, localT, 'posX', base.posX);
   if (prop === 'posY') return evalKeyframes(clip, localT, 'posY', base.posY);
+  if (prop === 'rotate') return evalKeyframes(clip, localT, 'rotate', base.rotate);
   if (prop === 'opacity') return evalKeyframes(clip, localT, 'opacity', 1);
   if (prop === 'volume') return evalKeyframes(clip, localT, 'volume', clip.volume ?? 1);
   return 0;
@@ -2728,12 +2786,22 @@ function renderInspector(focusText = false) {
       ? el('div', { class: 'field kf-field' },
           el('span', { text: 'Keyframes (at playhead)' }),
           el('div', { class: 'speed-row' },
-            ...KEYFRAME_PROPS.map((prop) => {
-              const kfLabels = { scale: '+ Size', posX: '+ Move X', posY: '+ Move Y', opacity: '+ Opacity', volume: '+ Volume' };
+            ...KEYFRAME_PROPS.filter((p) => {
+              if (p === 'volume') return clip.kind === 'audio' || clip.kind === 'video';
+              if (p === 'rotate' || p === 'scale' || p === 'posX' || p === 'posY') {
+                return clip.kind === 'video' || clip.kind === 'image';
+              }
+              return true;
+            }).map((prop) => {
+              const kfLabels = {
+                scale: '+ Size', posX: '+ Move X', posY: '+ Move Y',
+                rotate: '+ Rotate', opacity: '+ Opacity', volume: '+ Volume',
+              };
               const kfTips = {
                 scale: 'Animate size over time from this point',
                 posX: 'Animate horizontal position over time',
                 posY: 'Animate vertical position over time',
+                rotate: 'Animate rotation (degrees) over time',
                 opacity: 'Animate opacity (transparency) over time',
                 volume: 'Animate volume over time',
               };
@@ -2752,6 +2820,22 @@ function renderInspector(focusText = false) {
                   setClipProps(S.timeline, track.id, clip.id, { keyframes: kf });
                 }),
               });
+            }),
+            el('button', {
+              class: 'btn sm', text: 'Smooth', title: 'Ease all keyframes (spline smooth, like Resolve)',
+              onclick: () => apply(() => {
+                const src = clip.keyframes || {};
+                const kf = {};
+                let n = 0;
+                for (const [prop, pts] of Object.entries(src)) {
+                  if (!Array.isArray(pts) || !pts.length) continue;
+                  kf[prop] = pts.map((p, i, arr) => (i < arr.length - 1 ? { ...p, ease: 'ease' } : p));
+                  n += kf[prop].length;
+                }
+                if (!n) { toast('No keyframes to smooth — add some with + buttons first', true); return; }
+                setClipProps(S.timeline, track.id, clip.id, { keyframes: kf });
+                toast('Keyframes smoothed (ease in/out)');
+              }),
             }),
             el('button', {
               class: 'btn sm', text: 'Clear animations', title: 'Remove all animated values (keyframes) on this clip',
@@ -2803,6 +2887,7 @@ function renderInspector(focusText = false) {
         : a === 'slide-down' ? 'Slide down'
         : a === 'bounce' ? 'Bounce'
         : a === 'zoom-in' ? 'Zoom in'
+        : a === 'flicker' ? 'Flicker'
         : a)));
     const strokeW = el('input', { class: 'input', type: 'number', min: '0', max: '16', step: '1', value: String(Math.round(t.strokeWidth || 0)) });
     const strokeC = el('input', { class: 'input', type: 'color', value: /^#[0-9a-fA-F]{6}$/.test(t.strokeColor || '') ? t.strokeColor : '#000000', style: 'padding:2px;height:32px' });
@@ -2913,6 +2998,8 @@ function renderInspector(focusText = false) {
       (v) => apply(() => setClipProps(S.timeline, track.id, clip.id, { posX: v })), '1', '0');
     const posY = num('Focus Y %', tr.posY,
       (v) => apply(() => setClipProps(S.timeline, track.id, clip.id, { posY: v })), '1', '0');
+    const rot = num('Rotation (°)', tr.rotate,
+      (v) => apply(() => setClipProps(S.timeline, track.id, clip.id, { rotate: v })), '1', '-360');
 
     const effectSel = el('select', { class: 'input' },
       EFFECTS.map((ef) => el('option', {
@@ -2926,6 +3013,8 @@ function renderInspector(focusText = false) {
         : ef === 'noir' ? 'Noir (high-contrast B&W)'
         : ef === 'neon' ? 'Neon pop'
         : ef === 'luxury' ? 'Luxury gold'
+        : ef === 'vignette' ? 'Vignette (dark edges)'
+        : ef === 'soft' ? 'Soft focus'
         : ef.charAt(0).toUpperCase() + ef.slice(1))));
     effectSel.addEventListener('change', () => apply(() => setClipProps(S.timeline, track.id, clip.id, { effect: effectSel.value })));
 
@@ -2933,10 +3022,10 @@ function renderInspector(focusText = false) {
       el('div', { class: 'full insp-sec' }, 'Fit / size + look'),
       el('label', { class: 'field full' }, el('span', { text: 'Fit mode' }), fitSel),
       el('label', { class: 'field full' }, el('span', { text: `Zoom (${MIN_ZOOM}–${MAX_ZOOM}×)` }), zoomRow),
-      posX, posY,
+      posX, posY, rot,
       el('label', { class: 'field full' }, el('span', { text: 'Color effect' }), effectSel),
       el('div', { class: 'full', style: 'display:flex;gap:6px;flex-wrap:wrap' },
-        el('button', { class: 'btn sm', text: 'Reset transform', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { fit: 'cover', scale: 1, posX: 50, posY: 50, effect: 'none' })) }),
+        el('button', { class: 'btn sm', text: 'Reset transform', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { fit: 'cover', scale: 1, posX: 50, posY: 50, rotate: 0, effect: 'none' })) }),
         el('button', { class: 'btn sm', text: 'No crop (contain)', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { fit: 'contain', scale: 1, posX: 50, posY: 50 })) }),
         el('button', { class: 'btn sm primary', text: 'Make black & white', title: 'Apply black & white color effect', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { effect: 'bw' })) }),
       ),
@@ -3201,6 +3290,7 @@ function syncMedia(force) {
     }
   }
   updatePreviewBadges();
+  syncVignetteLayer();
   syncOverlays();
   syncPhonePreview();
 }

@@ -11,13 +11,15 @@ export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 4;
 export const FIT_MODES = ['cover', 'contain', 'fill'];
 export const LAYOUT_MODES = ['none', 'split-h', 'split-v'];
-export const EFFECTS = ['none', 'bw', 'sepia', 'warm', 'cool', 'vivid', 'vintage', 'teal', 'golden', 'noir', 'neon', 'luxury'];
+export const EFFECTS = ['none', 'bw', 'sepia', 'warm', 'cool', 'vivid', 'vintage', 'teal', 'golden', 'noir', 'neon', 'luxury', 'vignette', 'soft'];
 export const BG_MODES = ['none', 'inline', 'full'];
-export const TEXT_ANIMS = ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in'];
+export const TEXT_ANIMS = ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in', 'flicker'];
 export const TEXT_ALIGNS = ['left', 'center', 'right'];
 export const TEXT_FONTS = ['Arial', 'Impact', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Segoe UI', 'Courier New'];
 export const TRANSITIONS = ['none', 'fade', 'dip', 'flash', 'zoom', 'slide'];
-export const KEYFRAME_PROPS = ['scale', 'posX', 'posY', 'opacity', 'volume'];
+export const KEYFRAME_PROPS = ['scale', 'posX', 'posY', 'rotate', 'opacity', 'volume'];
+/** Per-keyframe segment curves (applies from a point to the next). Default linear. */
+export const EASE_MODES = ['linear', 'in', 'out', 'ease'];
 export const MAX_FADE_SEC = 10;
 
 /** One-click premium text looks (merged onto clip.text). */
@@ -178,14 +180,16 @@ export function clampZoom(n) {
   return round3(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v)));
 }
 
-/** Normalize clip transform: fit mode, zoom, focus point (0–100). */
+/** Normalize clip transform: fit mode, zoom, focus point (0–100), rotation (deg). */
 export function normalizeTransform(t = {}) {
   const fit = FIT_MODES.includes(t.fit) ? t.fit : 'cover';
+  const rot = Number(t.rotate ?? 0);
   return {
     fit,
     scale: clampZoom(t.scale ?? 1),
     posX: clamp(Number(t.posX ?? 50), 0, 100),
     posY: clamp(Number(t.posY ?? 50), 0, 100),
+    rotate: round3(Number.isFinite(rot) ? clamp(rot, -360, 360) : 0),
   };
 }
 
@@ -223,7 +227,9 @@ export function normalizeKeyframes(kf) {
       const pt = Number(p.t);
       const pv = Number(p.v);
       if (!Number.isFinite(pt) || !Number.isFinite(pv)) continue;
-      pts.push({ t: round3(Math.max(0, pt)), v: pv });
+      const node = { t: round3(Math.max(0, pt)), v: pv };
+      if (EASE_MODES.includes(p.ease) && p.ease !== 'linear') node.ease = p.ease;
+      pts.push(node);
     }
     pts.sort((a, b) => a.t - b.t);
     if (pts.length) out[prop] = pts;
@@ -231,7 +237,16 @@ export function normalizeKeyframes(kf) {
   return out;
 }
 
-/** Linear-eval a keyframe track at clip-local time `localT`. Missing track → fallback. */
+/** Apply segment ease curve to linear progress u∈[0,1]. */
+export function applyEase(u, mode) {
+  const x = Math.max(0, Math.min(1, u));
+  if (mode === 'in') return x * x;
+  if (mode === 'out') return 1 - (1 - x) * (1 - x);
+  if (mode === 'ease') return x * x * (3 - 2 * x);
+  return x;
+}
+
+/** Eval a keyframe track at clip-local time `localT`. Missing track → fallback. */
 export function evalKeyframes(clip, localT, prop, fallback) {
   const kfs = clip?.keyframes?.[prop];
   if (!Array.isArray(kfs) || !kfs.length) return fallback;
@@ -247,7 +262,8 @@ export function evalKeyframes(clip, localT, prop, fallback) {
     if (t <= b.t) {
       const span = b.t - a.t;
       if (span <= 1e-9) return b.v;
-      return a.v + (b.v - a.v) * ((t - a.t) / span);
+      const u = (t - a.t) / span;
+      return a.v + (b.v - a.v) * applyEase(u, a.ease);
     }
   }
   return last.v;
@@ -262,7 +278,11 @@ export function keyframeExpr(points, fallback, clipStart = 0, varName = 't') {
   if (!Array.isArray(points) || !points.length) return String(fallback);
   const pts = points
     .filter((p) => p && Number.isFinite(Number(p.t)) && Number.isFinite(Number(p.v)))
-    .map((p) => ({ t: round3(Number(p.t)), v: Number(p.v) }))
+    .map((p) => ({
+      t: round3(Number(p.t)),
+      v: Number(p.v),
+      ease: EASE_MODES.includes(p.ease) ? p.ease : 'linear',
+    }))
     .sort((a, b) => a.t - b.t);
   if (!pts.length) return String(fallback);
   const abs = (local) => round3((Number(clipStart) || 0) + local);
@@ -273,9 +293,17 @@ export function keyframeExpr(points, fallback, clipStart = 0, varName = 't') {
     const ta = abs(a.t);
     const tb = abs(b.t);
     const span = round3(tb - ta);
-    const seg = span <= 1e-9
-      ? formatExprNum(b.v)
-      : `${formatExprNum(a.v)}+(${formatExprNum(b.v)}-${formatExprNum(a.v)})*(${varName}-${ta})/${span}`;
+    let seg;
+    if (span <= 1e-9) {
+      seg = formatExprNum(b.v);
+    } else {
+      const u = `(${varName}-${ta})/${span}`;
+      let uExpr = `(${u})`;
+      if (a.ease === 'ease') uExpr = `(${u})*(${u})*(3-2*(${u}))`;
+      else if (a.ease === 'in') uExpr = `(${u})*(${u})`;
+      else if (a.ease === 'out') uExpr = `(1-(1-(${u}))*(1-(${u})))`;
+      seg = `${formatExprNum(a.v)}+(${formatExprNum(b.v)}-${formatExprNum(a.v)})*${uExpr}`;
+    }
     expr = `if(lt(${varName},${tb}),${seg},${expr})`;
   }
   const t0 = abs(pts[0].t);
@@ -490,6 +518,7 @@ export function makeClip({
   scale = null,
   posX = null,
   posY = null,
+  rotate = null,
   effect = null,
   fadeIn = 0,
   fadeOut = 0,
@@ -517,11 +546,12 @@ export function makeClip({
   }
   if (kind === 'image' || kind === 'video') {
     clip.overlay = normalizeOverlay(overlay || null, kind);
-    const tr = normalizeTransform({ fit, scale, posX, posY });
+    const tr = normalizeTransform({ fit, scale, posX, posY, rotate });
     clip.fit = tr.fit;
     clip.scale = tr.scale;
     clip.posX = tr.posX;
     clip.posY = tr.posY;
+    clip.rotate = tr.rotate;
     clip.effect = normalizeEffect(effect);
   }
   return clip;
@@ -756,7 +786,7 @@ export function duplicateClip(timeline, trackId, clipId, newStart = null) {
 
 const CLIP_PROP_KEYS = [
   'volume', 'muted', 'start', 'duration', 'srcIn', 'overlay', 'speed',
-  'fit', 'scale', 'posX', 'posY', 'effect',
+  'fit', 'scale', 'posX', 'posY', 'rotate', 'effect',
   'fadeIn', 'fadeOut', 'transitionIn', 'keyframes',
 ];
 
@@ -781,10 +811,11 @@ export function setClipProps(timeline, trackId, clipId, props = {}) {
     if (clip.kind !== 'text') clip.overlay = normalizeOverlay({ ...clip.overlay, ...rest.overlay }, clip.kind);
     else throw new TimelineError('BAD_PROP', 'Text clips do not have overlay props');
   }
-  const hasTransform = rest.fit != null || rest.scale != null || rest.posX != null || rest.posY != null;
+  const hasTransform = rest.fit != null || rest.scale != null || rest.posX != null
+    || rest.posY != null || rest.rotate != null;
   if (hasTransform) {
     if (clip.kind !== 'video' && clip.kind !== 'image') {
-      throw new TimelineError('BAD_PROP', 'Fit/scale/position only apply to video/image clips');
+      throw new TimelineError('BAD_PROP', 'Fit/scale/position/rotation only apply to video/image clips');
     }
     if (rest.fit != null && !FIT_MODES.includes(rest.fit)) {
       throw new TimelineError('BAD_FIT', `fit must be one of: ${FIT_MODES.join(', ')}`);
@@ -794,11 +825,13 @@ export function setClipProps(timeline, trackId, clipId, props = {}) {
       scale: rest.scale != null ? rest.scale : (clip.scale ?? 1),
       posX: rest.posX != null ? rest.posX : (clip.posX ?? 50),
       posY: rest.posY != null ? rest.posY : (clip.posY ?? 50),
+      rotate: rest.rotate != null ? rest.rotate : (clip.rotate ?? 0),
     });
     clip.fit = next.fit;
     clip.scale = next.scale;
     clip.posX = next.posX;
     clip.posY = next.posY;
+    clip.rotate = next.rotate;
   }
   if (rest.effect != null) {
     if (clip.kind !== 'video' && clip.kind !== 'image') {
@@ -974,6 +1007,10 @@ export function validateTimeline(timeline) {
                 err('BAD_KEYFRAME_POINT', `Clip ${clip.id} keyframes.${pk} has invalid point`);
                 break;
               }
+              if (p.ease != null && !EASE_MODES.includes(p.ease)) {
+                err('BAD_KEYFRAME_EASE', `Clip ${clip.id} keyframes.${pk} ease must be one of: ${EASE_MODES.join(', ')}`);
+                break;
+              }
             }
           }
         }
@@ -989,6 +1026,9 @@ export function validateTimeline(timeline) {
           if (clip[pk] != null && (!Number.isFinite(clip[pk]) || clip[pk] < 0 || clip[pk] > 100)) {
             err('BAD_POS', `Clip ${clip.id} ${pk} out of range 0–100`);
           }
+        }
+        if (clip.rotate != null && (!Number.isFinite(clip.rotate) || clip.rotate < -360 || clip.rotate > 360)) {
+          err('BAD_ROTATE', `Clip ${clip.id} rotate out of range -360–360`);
         }
         if (clip.effect != null && !EFFECTS.includes(clip.effect)) {
           err('BAD_EFFECT', `Clip ${clip.id} effect must be one of: ${EFFECTS.join(', ')}`);
@@ -1061,7 +1101,11 @@ function remapKeyframesSplit(keyframes, leftDur) {
     const atCut = evalKeyframes({ keyframes: { [prop]: sorted } }, cut, prop, sorted[0].v);
     const rightPts = [{ t: 0, v: round3(atCut) }];
     for (const p of sorted) {
-      if (p.t > cut) rightPts.push({ t: round3(p.t - cut), v: p.v });
+      if (p.t > cut) {
+        const node = { t: round3(p.t - cut), v: p.v };
+        if (p.ease) node.ease = p.ease;
+        rightPts.push(node);
+      }
     }
     right[prop] = rightPts;
   }

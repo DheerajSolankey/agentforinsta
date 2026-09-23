@@ -10,8 +10,8 @@ import {
   EFFECTS, BG_MODES, normalizeEffect, normalizeBgMode, bgToCss, bgToFfmpeg,
   TEXT_ANIMS, TEXT_ALIGNS, TEXT_PRESETS, normalizeTextAnim, normalizeTextAlign,
   estimateBannerLines, bannerBoxHeight, snapPct,
-  evalKeyframes, keyframeExpr, fadeGain, transitionGain, clampFade,
-  TRANSITIONS, KEYFRAME_PROPS, MAX_FADE_SEC,
+  evalKeyframes, keyframeExpr, fadeGain, transitionGain, clampFade, normalizeKeyframes,
+  TRANSITIONS, KEYFRAME_PROPS, MAX_FADE_SEC, EASE_MODES, applyEase,
 } from '../shared/timeline-ops.js';
 
 function tl() {
@@ -345,16 +345,20 @@ test('transform: makeClip defaults, setClipProps fit/scale/pos, validate', () =>
   b3.posX = 150;
   assert.ok(validateTimeline(bad3).some((i) => i.code === 'BAD_POS'));
 
-  assert.deepEqual(normalizeTransform({ fit: 'contain', scale: 2, posX: 10, posY: 90 }), {
-    fit: 'contain', scale: 2, posX: 10, posY: 90,
+  assert.deepEqual(normalizeTransform({ fit: 'contain', scale: 2, posX: 10, posY: 90, rotate: 45 }), {
+    fit: 'contain', scale: 2, posX: 10, posY: 90, rotate: 45,
   });
-  assert.deepEqual(normalizeTransform({}), { fit: 'cover', scale: 1, posX: 50, posY: 50 });
-  assert.deepEqual(normalizeTransform({ fit: 'bad' }), { fit: 'cover', scale: 1, posX: 50, posY: 50 });
+  assert.deepEqual(normalizeTransform({}), { fit: 'cover', scale: 1, posX: 50, posY: 50, rotate: 0 });
+  assert.deepEqual(normalizeTransform({ fit: 'bad', rotate: 'x' }), { fit: 'cover', scale: 1, posX: 50, posY: 50, rotate: 0 });
+  assert.equal(normalizeTransform({ rotate: 999 }).rotate, 360);
+  assert.equal(normalizeTransform({ rotate: -999 }).rotate, -360);
 });
 
 test('effects: normalize, setClipProps, validate', () => {
-  assert.deepEqual(EFFECTS, ['none', 'bw', 'sepia', 'warm', 'cool', 'vivid', 'vintage', 'teal', 'golden', 'noir', 'neon', 'luxury']);
+  assert.deepEqual(EFFECTS, ['none', 'bw', 'sepia', 'warm', 'cool', 'vivid', 'vintage', 'teal', 'golden', 'noir', 'neon', 'luxury', 'vignette', 'soft']);
   assert.equal(normalizeEffect('bw'), 'bw');
+  assert.equal(normalizeEffect('vignette'), 'vignette');
+  assert.equal(normalizeEffect('soft'), 'soft');
   assert.equal(normalizeEffect('nope'), 'none');
   assert.equal(normalizeBgMode('full'), 'full');
   assert.equal(normalizeBgMode('x'), 'none');
@@ -394,7 +398,7 @@ test('effects: normalize, setClipProps, validate', () => {
 });
 
 test('text premium: presets, anim/align normalize, banner sizing', () => {
-  assert.deepEqual(TEXT_ANIMS, ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in']);
+  assert.deepEqual(TEXT_ANIMS, ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in', 'flicker']);
   assert.ok(TEXT_ALIGNS.includes('center'));
   assert.ok(TEXT_PRESETS.meme.bgMode === 'full');
   assert.ok(TEXT_PRESETS.outline.strokeWidth > 0);
@@ -515,6 +519,18 @@ test('fades, transitions, keyframes: setClipProps + validate + eval', () => {
   assert.equal(evalKeyframes({ keyframes: { scale: [{ t: 0, v: 1 }, { t: 4, v: 2 }] } }, 2, 'scale', 9), 1.5);
   assert.equal(evalKeyframes({ keyframes: { scale: [{ t: 1, v: 3 }] } }, 0, 'scale', 9), 3);
   assert.equal(evalKeyframes({}, 0, 'scale', 7), 7);
+  // ease modes (opt-in per point; default stays linear)
+  assert.ok(Math.abs(evalKeyframes({ keyframes: { scale: [{ t: 0, v: 1, ease: 'in' }, { t: 4, v: 2 }] } }, 2, 'scale', 0) - 1.25) < 1e-9);
+  assert.ok(Math.abs(evalKeyframes({ keyframes: { scale: [{ t: 0, v: 1, ease: 'out' }, { t: 4, v: 2 }] } }, 2, 'scale', 0) - 1.75) < 1e-9);
+  assert.ok(Math.abs(evalKeyframes({ keyframes: { scale: [{ t: 0, v: 1, ease: 'ease' }, { t: 4, v: 2 }] } }, 2, 'scale', 0) - 1.5) < 1e-9);
+  // ease preserved by normalizeKeyframes
+  const nkf = normalizeKeyframes({ scale: [{ t: 0, v: 1, ease: 'in' }, { t: 2, v: 2 }] });
+  assert.equal(nkf.scale[0].ease, 'in');
+  assert.equal(nkf.scale[1].ease, undefined);
+  assert.deepEqual(EASE_MODES, ['linear', 'in', 'out', 'ease']);
+  assert.equal(applyEase(0.5, 'in'), 0.25);
+  assert.equal(applyEase(0.5, 'linear'), 0.5);
+  assert.ok(Math.abs(applyEase(0.5, 'ease') - 0.5) < 1e-9);
 
   // fadeGain envelope
   const clip = { duration: 4, fadeIn: 1, fadeOut: 1 };
@@ -559,6 +575,24 @@ test('fades, transitions, keyframes: setClipProps + validate + eval', () => {
   assert.ok(expr.includes('10')); // clipStart shift
   assert.equal(keyframeExpr(null, 0.5, 0), '0.5');
   assert.equal(keyframeExpr([], 2, 0), '2');
+  // eased segment uses smoothstep
+  const easedExpr = keyframeExpr([{ t: 0, v: 1, ease: 'ease' }, { t: 2, v: 3 }], 1, 0);
+  assert.ok(easedExpr.includes('(3-2*'));
+  const linExpr = keyframeExpr([{ t: 0, v: 1, ease: 'linear' }, { t: 2, v: 3 }], 1, 0);
+  assert.ok(!linExpr.includes('(3-2*'));
+
+  // rotate prop + validation
+  assert.ok(KEYFRAME_PROPS.includes('rotate'));
+  const rt = tl();
+  const rc = addClip(rt, 'v1', { kind: 'video', assetId: 'media-0001', start: 0, duration: 2, srcIn: 0, volume: 1, rotate: 30 });
+  assert.equal(rc.rotate, 30);
+  setClipProps(rt, 'v1', rc.id, { rotate: -45 });
+  assert.equal(getClip(rt, 'v1', rc.id).clip.rotate, -45);
+  assert.equal(validateTimeline(rt).length, 0);
+  const badRot = cloneTimeline(tl());
+  const br = addClip(badRot, 'v1', { kind: 'video', assetId: 'media-0001', start: 0, duration: 1, srcIn: 0, volume: 1 });
+  br.rotate = 400;
+  assert.ok(validateTimeline(badRot).some((i) => i.code === 'BAD_ROTATE'));
 
   assert.ok(TRANSITIONS.includes('fade'));
   assert.ok(KEYFRAME_PROPS.includes('opacity'));
