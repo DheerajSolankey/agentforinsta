@@ -1,0 +1,251 @@
+{
+  "styles": [
+    {
+      "name": "Cinematic Motivation",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Slow cinematic motivational editing with strong opening hook, moderate cuts, subtle zooms, large animated captions and emotional music.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 18, "max": 28 },
+        "hookDuration": { "min": 0, "max": 2 },
+        "shotDuration": { "min": 1.5, "max": 4 }
+      },
+      "cuts": { "frequency": "medium", "beatSync": true },
+      "transitions": { "primary": "hard_cut", "secondary": "fade", "intensity": "low" },
+      "motion": { "zoom": true, "zoomMin": 1.02, "zoomMax": 1.06 },
+      "captions": { "position": "center", "maxLines": 2, "animation": "word_emphasis" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.15, "ducking": true },
+      "visual": { "contrast": "high", "saturation": "medium" }
+    },
+    {
+      "name": "Fast Viral",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "High-energy viral pacing: rapid cuts on the beat, punchy bold captions, aggressive zooms.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 12, "max": 21 },
+        "hookDuration": { "min": 0, "max": 1.2 },
+        "shotDuration": { "min": 0.6, "max": 1.8 }
+      },
+      "cuts": { "frequency": "high", "beatSync": true },
+      "transitions": { "primary": "hard_cut", "secondary": "zoom", "intensity": "high" },
+      "motion": { "zoom": true, "zoomMin": 1.04, "zoomMax": 1.12 },
+      "captions": { "position": "center", "maxLines": 2, "animation": "pop" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.25, "ducking": true },
+      "visual": { "contrast": "high", "saturation": "high" }
+    },
+    {
+      "name": "Dark Motivation",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Dark, gritty motivation: low-key color, deep contrast, heavy captions, brooding music.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 18, "max": 30 },
+        "hookDuration": { "min": 0, "max": 2 },
+        "shotDuration": { "min": 1.5, "max": 3.5 }
+      },
+      "cuts": { "frequency": "medium", "beatSync": true },
+      "transitions": { "primary": "hard_cut", "secondary": "flash", "intensity": "medium" },
+      "motion": { "zoom": true, "zoomMin": 1.02, "zoomMax": 1.08 },
+      "captions": { "position": "center", "maxLines": 2, "animation": "word_emphasis" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.18, "ducking": true },
+      "visual": { "contrast": "high", "saturation": "low", "preset": "dark" }
+    },
+    {
+      "name": "Minimal Quote",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Clean minimal quote reels: lots of negative space, single typeface, gentle motion.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 10, "max": 20 },
+        "hookDuration": { "min": 0, "max": 1.5 },
+        "shotDuration": { "min": 2.5, "max": 5 }
+      },
+      "cuts": { "frequency": "low", "beatSync": false },
+      "transitions": { "primary": "hard_cut", "secondary": "fade", "intensity": "low" },
+      "motion": { "zoom": true, "zoomMin": 1.01, "zoomMax": 1.04 },
+      "captions": { "position": "center", "maxLines": 3, "animation": "fade" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.12, "ducking": true },
+      "visual": { "contrast": "medium", "saturation": "low" }
+    },
+    {
+      "name": "Aesthetic Quote",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Soft aesthetic quotes: warm tones, airy captions, gentle crossfades, ambient beds.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 12, "max": 24 },
+        "hookDuration": { "min": 0, "max": 2 },
+        "shotDuration": { "min": 2, "max": 4.5 }
+      },
+      "cuts": { "frequency": "low", "beatSync": false },
+      "transitions": { "primary": "crossfade", "secondary": "fade", "intensity": "low" },
+      "motion": { "zoom": true, "zoomMin": 1.02, "zoomMax": 1.05 },
+      "captions": { "position": "center", "maxLines": 3, "animation": "fade" },
+      "audio": { "voicePriority": "medium", "musicVolume": 0.2, "ducking": true },
+      "visual": { "contrast": "medium", "saturation": "medium", "preset": "warm" }
+    },
+    {
+      "name": "Movie Analysis",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Analytical film breakdowns: steady pacing, subtitle-style captions, restrained motion.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 25, "max": 55 },
+        "hookDuration": { "min": 0, "max": 3 },
+        "shotDuration": { "min": 2, "max": 5 }
+      },
+      "cuts": { "frequency": "medium", "beatSync": false },
+      "transitions": { "primary": "hard_cut", "secondary": "fade", "intensity": "low" },
+      "motion": { "zoom": true, "zoomMin": 1.01, "zoomMax": 1.03 },
+      "captions": { "position": "bottom", "maxLines": 2, "animation": "none" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.1, "ducking": true },
+      "visual": { "contrast": "medium", "saturation": "medium" }
+    },
+    {
+      "name": "Movie Facts",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Rapid movie-fact reels: hook-per-fact, punchy captions, mid-tempo cuts.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 15, "max": 30 },
+        "hookDuration": { "min": 0, "max": 1.5 },
+        "shotDuration": { "min": 1.2, "max": 3 }
+      },
+      "cuts": { "frequency": "medium", "beatSync": true },
+      "transitions": { "primary": "hard_cut", "secondary": "zoom", "intensity": "medium" },
+      "motion": { "zoom": true, "zoomMin": 1.02, "zoomMax": 1.06 },
+      "captions": { "position": "center", "maxLines": 2, "animation": "pop" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.2, "ducking": true },
+      "visual": { "contrast": "high", "saturation": "medium" }
+    },
+    {
+      "name": "Emotional Story",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Emotional narrative arcs: slow open, rising pace, soft captions, warm grade.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 20, "max": 40 },
+        "hookDuration": { "min": 0, "max": 2.5 },
+        "shotDuration": { "min": 2, "max": 5 }
+      },
+      "cuts": { "frequency": "low", "beatSync": false },
+      "transitions": { "primary": "crossfade", "secondary": "fade", "intensity": "medium" },
+      "motion": { "zoom": true, "zoomMin": 1.02, "zoomMax": 1.05 },
+      "captions": { "position": "center", "maxLines": 2, "animation": "fade" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.16, "ducking": true },
+      "visual": { "contrast": "medium", "saturation": "medium", "preset": "warm" }
+    },
+    {
+      "name": "Storytelling",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Straight storytelling: scene-driven cuts, readable captions, voice-forward mix.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 20, "max": 45 },
+        "hookDuration": { "min": 0, "max": 2 },
+        "shotDuration": { "min": 2, "max": 5.5 }
+      },
+      "cuts": { "frequency": "medium", "beatSync": false },
+      "transitions": { "primary": "hard_cut", "secondary": "fade", "intensity": "low" },
+      "motion": { "zoom": false },
+      "captions": { "position": "bottom", "maxLines": 2, "animation": "none" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.12, "ducking": true },
+      "visual": { "contrast": "medium", "saturation": "medium" }
+    },
+    {
+      "name": "Luxury / Success",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Luxury success aesthetic: slow confident cuts, gold/black captions, refined music.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 15, "max": 28 },
+        "hookDuration": { "min": 0, "max": 2 },
+        "shotDuration": { "min": 1.8, "max": 4 }
+      },
+      "cuts": { "frequency": "medium", "beatSync": true },
+      "transitions": { "primary": "hard_cut", "secondary": "fade", "intensity": "low" },
+      "motion": { "zoom": true, "zoomMin": 1.02, "zoomMax": 1.05 },
+      "captions": { "position": "center", "maxLines": 2, "animation": "fade" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.15, "ducking": true },
+      "visual": { "contrast": "high", "saturation": "low", "preset": "luxury" }
+    },
+    {
+      "name": "Meme Fast Cut",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Meme-style rapid cuts, big Impact-style captions, comedic timing.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 8, "max": 18 },
+        "hookDuration": { "min": 0, "max": 1 },
+        "shotDuration": { "min": 0.5, "max": 1.5 }
+      },
+      "cuts": { "frequency": "high", "beatSync": false },
+      "transitions": { "primary": "hard_cut", "secondary": "flash", "intensity": "medium" },
+      "motion": { "zoom": true, "zoomMin": 1.05, "zoomMax": 1.15 },
+      "captions": { "position": "top", "maxLines": 3, "animation": "pop" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.3, "ducking": true },
+      "visual": { "contrast": "high", "saturation": "high" }
+    },
+    {
+      "name": "Beat Sync",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Everything locked to the beat: cuts, text entries and zooms hit on downbeats.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 15, "max": 30 },
+        "hookDuration": { "min": 0, "max": 1.5 },
+        "shotDuration": { "min": 1, "max": 2.5 }
+      },
+      "cuts": { "frequency": "high", "beatSync": true },
+      "transitions": { "primary": "hard_cut", "secondary": "zoom", "intensity": "medium" },
+      "motion": { "zoom": true, "zoomMin": 1.03, "zoomMax": 1.08 },
+      "captions": { "position": "center", "maxLines": 2, "animation": "pop" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.22, "ducking": true },
+      "visual": { "contrast": "high", "saturation": "medium" }
+    },
+    {
+      "name": "Clean Educational",
+      "version": 1,
+      "builtin": true,
+      "locked": true,
+      "description": "Clear teaching reels: readable captions, calm pacing, low-distraction visuals.",
+      "canvas": { "aspectRatio": "9:16" },
+      "timing": {
+        "targetDuration": { "min": 20, "max": 45 },
+        "hookDuration": { "min": 0, "max": 2 },
+        "shotDuration": { "min": 2.5, "max": 6 }
+      },
+      "cuts": { "frequency": "low", "beatSync": false },
+      "transitions": { "primary": "hard_cut", "secondary": "fade", "intensity": "low" },
+      "motion": { "zoom": false },
+      "captions": { "position": "bottom", "maxLines": 2, "animation": "none" },
+      "audio": { "voicePriority": "high", "musicVolume": 0.1, "ducking": true },
+      "visual": { "contrast": "medium", "saturation": "medium" }
+    }
+  ]
+}

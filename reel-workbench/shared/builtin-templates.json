@@ -1,0 +1,146 @@
+{
+  "templates": [
+    {
+      "name": "Quote",
+      "version": 1,
+      "builtin": true,
+      "description": "Single powerful quote with attribution.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.2 },
+        { "id": "context", "label": "Context", "weight": 0.5 },
+        { "id": "ending", "label": "Ending", "weight": 0.3 }
+      ]
+    },
+    {
+      "name": "Motivation",
+      "version": 1,
+      "builtin": true,
+      "description": "Motivational arc from tension to call to action.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.12 },
+        { "id": "context", "label": "Context", "weight": 0.23 },
+        { "id": "build", "label": "Build", "weight": 0.3 },
+        { "id": "payoff", "label": "Payoff", "weight": 0.2 },
+        { "id": "cta", "label": "CTA", "weight": 0.15 }
+      ]
+    },
+    {
+      "name": "Movie Analysis",
+      "version": 1,
+      "builtin": true,
+      "description": "Setup, analysis beats, takeaway.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.15 },
+        { "id": "context", "label": "Setup", "weight": 0.2 },
+        { "id": "build", "label": "Analysis", "weight": 0.4 },
+        { "id": "payoff", "label": "Takeaway", "weight": 0.15 },
+        { "id": "cta", "label": "CTA", "weight": 0.1 }
+      ]
+    },
+    {
+      "name": "Movie Facts",
+      "version": 1,
+      "builtin": true,
+      "description": "Hook, three facts, CTA.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.15 },
+        { "id": "build", "label": "Facts", "weight": 0.6 },
+        { "id": "cta", "label": "CTA", "weight": 0.25 }
+      ]
+    },
+    {
+      "name": "Storytelling",
+      "version": 1,
+      "builtin": true,
+      "description": "Classic narrative structure.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.15 },
+        { "id": "context", "label": "Setup", "weight": 0.25 },
+        { "id": "build", "label": "Rising Action", "weight": 0.3 },
+        { "id": "payoff", "label": "Climax", "weight": 0.2 },
+        { "id": "ending", "label": "Ending", "weight": 0.1 }
+      ]
+    },
+    {
+      "name": "Emotional Story",
+      "version": 1,
+      "builtin": true,
+      "description": "Emotion-first narrative with soft CTA.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.18 },
+        { "id": "context", "label": "Context", "weight": 0.27 },
+        { "id": "build", "label": "Build", "weight": 0.25 },
+        { "id": "payoff", "label": "Payoff", "weight": 0.2 },
+        { "id": "ending", "label": "Ending", "weight": 0.1 }
+      ]
+    },
+    {
+      "name": "POV",
+      "version": 1,
+      "builtin": true,
+      "description": "POV framing with reaction payoff.",
+      "sections": [
+        { "id": "hook", "label": "POV Setup", "weight": 0.25 },
+        { "id": "build", "label": "Situation", "weight": 0.45 },
+        { "id": "payoff", "label": "Reaction", "weight": 0.3 }
+      ]
+    },
+    {
+      "name": "Listicle",
+      "version": 1,
+      "builtin": true,
+      "description": "Numbered list with intro and outro.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.15 },
+        { "id": "build", "label": "Items", "weight": 0.65 },
+        { "id": "cta", "label": "CTA", "weight": 0.2 }
+      ]
+    },
+    {
+      "name": "3 Things",
+      "version": 1,
+      "builtin": true,
+      "description": "Exactly three points, fast.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.15 },
+        { "id": "build", "label": "3 Things", "weight": 0.65 },
+        { "id": "cta", "label": "CTA", "weight": 0.2 }
+      ]
+    },
+    {
+      "name": "Before / After",
+      "version": 1,
+      "builtin": true,
+      "description": "Contrast structure.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.15 },
+        { "id": "context", "label": "Before", "weight": 0.35 },
+        { "id": "payoff", "label": "After", "weight": 0.35 },
+        { "id": "cta", "label": "CTA", "weight": 0.15 }
+      ]
+    },
+    {
+      "name": "Problem → Solution",
+      "version": 1,
+      "builtin": true,
+      "description": "Pain point then resolution.",
+      "sections": [
+        { "id": "hook", "label": "Problem", "weight": 0.3 },
+        { "id": "context", "label": "Agitation", "weight": 0.2 },
+        { "id": "payoff", "label": "Solution", "weight": 0.35 },
+        { "id": "cta", "label": "CTA", "weight": 0.15 }
+      ]
+    },
+    {
+      "name": "Hook → Value → CTA",
+      "version": 1,
+      "builtin": true,
+      "description": "Minimal direct-response structure.",
+      "sections": [
+        { "id": "hook", "label": "Hook", "weight": 0.2 },
+        { "id": "build", "label": "Value", "weight": 0.55 },
+        { "id": "cta", "label": "CTA", "weight": 0.25 }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "reel-workbench",
+  "version": "0.1.0",
+  "description": "Personal local-first Reel editing workbench (OpenCode + FFmpeg)",
+  "type": "module",
+  "private": true,
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "fixtures": "node scripts/make-fixtures.js",
+    "test": "node --test tests/timeline.test.js tests/security.test.js tests/renderer.test.js tests/captions.test.js tests/integration.test.js",
+    "smoke": "node scripts/smoke-render.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.0.1"
+  }
+}
