@@ -146,26 +146,26 @@ function buildUi(root) {
   const saveState = el('span', { class: 'save-state', id: 'saveState', text: 'Saved' });
 
   const toolbar = el('div', { class: 'editor-toolbar' },
-    el('a', { class: 'icon-btn', href: '#/projects', title: 'Back to projects', text: '←' }),
+    el('a', { class: 'icon-btn', href: '#/projects', title: 'Back to projects', 'aria-label': 'Back to projects', text: '←' }),
     nameInput,
     saveState,
     el('div', { class: 'tb-sep' }),
-    btn('Undo', 'Ctrl+Z', doUndo, 'ghost'),
-    btn('Redo', 'Ctrl+⇧+Z', doRedo, 'ghost'),
+    btn('Undo', 'Undo (Ctrl+Z)', doUndo, 'ghost'),
+    btn('Redo', 'Redo (Ctrl+Y)', doRedo, 'ghost'),
     el('div', { class: 'tb-sep' }),
-    btn('Split', 'S', doSplit, ''),
-    btn('Text', '+ T1', doAddText, ''),
-    btn('Duplicate', '', doDuplicate, ''),
-    btn('Delete', 'Del', doDelete, 'danger'),
+    btn('Split', 'Cut the selected clip in two at the playhead (S)', doSplit, ''),
+    btn('Text', 'Add a title or caption (Text track)', doAddText, ''),
+    btn('Duplicate', 'Copy the selected clip', doDuplicate, ''),
+    btn('Delete', 'Remove the selected clip (Del)', doDelete, 'danger'),
     el('div', { class: 'tb-sep' }),
     layoutControls(),
     el('div', { class: 'spacer' }),
-    el('button', { class: 'btn sm', text: 'Safe guides', onclick: (e) => {
+    el('button', { class: 'btn sm', text: 'Safe guides', title: 'Show Instagram UI safe zones over the preview', onclick: (e) => {
       document.querySelector('.safe-guides')?.classList.toggle('hidden');
       e.currentTarget.classList.toggle('primary');
     } }),
-    el('button', { class: 'btn sm', text: '⤓ Preview', title: 'Fast low-quality render', onclick: () => startRender('preview') }),
-    el('button', { class: 'btn primary', text: 'Render final', onclick: () => startRender('final') })
+    el('button', { class: 'btn sm', text: 'Quick preview', title: 'Fast low-quality render to check your edit', onclick: () => startRender('preview') }),
+    el('button', { class: 'btn primary', text: 'Render final', title: 'Export the finished 1080×1920 Reel', onclick: () => startRender('final') })
   );
 
   /* ---- left: media ---- */
@@ -224,16 +224,28 @@ function buildUi(root) {
     { id: 'audio', label: 'Music/Voice/SFX' }, { id: 'reference', label: 'References' },
     { id: 'all', label: 'All' },
   ]) {
-    const chip = el('span', { class: `chip ${c.id === mediaCat ? 'active' : ''}`, text: c.label });
+    const chip = el('button', {
+      type: 'button',
+      class: `chip ${c.id === mediaCat ? 'active' : ''}`,
+      text: c.label,
+      'aria-pressed': c.id === mediaCat ? 'true' : 'false',
+    });
     chip.addEventListener('click', () => {
       mediaCat = c.id;
-      catChips.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+      catChips.querySelectorAll('.chip').forEach((x) => {
+        x.classList.remove('active');
+        x.setAttribute('aria-pressed', 'false');
+      });
       chip.classList.add('active');
+      chip.setAttribute('aria-pressed', 'true');
       refreshMedia();
     });
     catChips.append(chip);
   }
-  const search = el('input', { class: 'input', placeholder: 'Search…', style: 'margin-bottom:8px;padding:5px 8px' });
+  const search = el('input', {
+    class: 'input', placeholder: 'Search…', 'aria-label': 'Search media by name',
+    style: 'margin-bottom:8px;padding:5px 8px',
+  });
   search.addEventListener('input', () => { mediaQ = search.value.trim().toLowerCase(); refreshMedia(); });
 
   const importBtn = el('button', {
@@ -265,7 +277,9 @@ function buildUi(root) {
 
   const leftPanel = el('div', { class: 'panel' },
     el('div', { class: 'panel-head', text: 'Media' }),
-    el('div', { class: 'panel-body' }, search, catChips, mediaList, importBtn)
+    el('div', { class: 'panel-body' },
+      el('div', { class: 'region-hint', html: 'Drag a video onto the <b>timeline</b> below — or double-click to add at the red line.' }),
+      search, catChips, mediaList, importBtn)
   );
 
   /* ---- center: preview ---- */
@@ -284,7 +298,7 @@ function buildUi(root) {
   const emptyState = el('div', { class: 'preview-empty', id: 'previewEmpty' },
     el('div', { class: 'pe-icon', text: '▶' }),
     el('div', { class: 'pe-title', text: 'No video at playhead' }),
-    el('div', { text: 'Drag a clip onto V1, or move the playhead over a clip. Click a timeline clip to edit it.' })
+    el('div', { text: 'Drag a clip onto the top timeline row (V1), or move the red line over a clip. Click a timeline clip to edit it.' })
   );
   const badges = el('div', { class: 'preview-badges', id: 'previewBadges' });
   const selBox = el('div', { class: 'sel-box', id: 'selBox' },
@@ -311,9 +325,9 @@ function buildUi(root) {
   S.snapGuides = snapGuides;
   bindSelBox(selBox);
 
-  const playBtn = el('button', { class: 'btn sm primary', text: '▶', title: 'Play / pause (Space)', onclick: togglePlay });
+  const playBtn = el('button', { class: 'btn sm primary', text: '▶', title: 'Play / pause (Space)', 'aria-label': 'Play or pause', onclick: togglePlay });
   const timeLabel = el('span', { class: 'transport-time', text: '0:00.0 / 0:00.0' });
-  const scrub = el('div', { class: 'scrub' }, el('div', { class: 'fill' }), el('div', { class: 'head' }));
+  const scrub = el('div', { class: 'scrub', role: 'slider', 'aria-label': 'Playback position', 'aria-valuemin': '0', tabindex: '0' }, el('div', { class: 'fill' }), el('div', { class: 'head' }));
   scrub.addEventListener('pointerdown', (e) => {
     const move = (ev) => {
       const r = scrub.getBoundingClientRect();
@@ -325,14 +339,22 @@ function buildUi(root) {
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   });
+  scrub.addEventListener('keydown', (e) => {
+    const dur = timelineDuration(S.timeline);
+    const fps = S.timeline.fps || 30;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); setPlayhead(S.playhead - (e.shiftKey ? 1 : 1 / fps)); }
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); setPlayhead(S.playhead + (e.shiftKey ? 1 : 1 / fps)); }
+    else if (e.key === 'Home') { e.preventDefault(); setPlayhead(0); }
+    else if (e.key === 'End') { e.preventDefault(); setPlayhead(dur); }
+  });
   const frameStep = (n) => setPlayhead(S.playhead + n / (S.timeline.fps || 30));
 
   const transport = el('div', { class: 'preview-transport' },
     playBtn,
-    el('button', { class: 'btn sm ghost', text: '⏮', title: 'Frame back', onclick: () => frameStep(-1) }),
-    el('button', { class: 'btn sm ghost', text: '⏭', title: 'Frame fwd', onclick: () => frameStep(1) }),
+    el('button', { class: 'btn sm ghost', text: '⏮', title: 'Frame back', 'aria-label': 'Step one frame back', onclick: () => frameStep(-1) }),
+    el('button', { class: 'btn sm ghost', text: '⏭', title: 'Frame fwd', 'aria-label': 'Step one frame forward', onclick: () => frameStep(1) }),
     timeLabel, scrub,
-    el('button', { class: 'btn sm ghost', text: '◇', title: 'Add marker (M)', onclick: addMarkerAtPlayhead }),
+    el('button', { class: 'btn sm ghost', text: '◇', title: 'Add marker (M)', 'aria-label': 'Add marker', onclick: addMarkerAtPlayhead }),
     el('button', { class: 'btn sm ghost', text: 'Loop', title: 'Toggle loop region (L)', onclick: toggleLoop }),
     el('span', { class: 'muted mono', style: 'font-size:10.5px', text: 'Space · S · M · L · Del · Ctrl+Z · Ctrl+K · ?' })
   );
@@ -341,25 +363,26 @@ function buildUi(root) {
   const quickStyle = el('div', { class: 'quick-style', id: 'quickStyle' },
     el('span', { class: 'qs-label', text: 'Style' }),
     el('button', {
-      class: 'btn sm qs-btn', text: '▣ Top banner', title: 'Add/select text + full-width white top banner (meme look)',
+      class: 'btn sm qs-btn', text: '▣ Top title bar', title: 'Add/select text + full-width white top banner (meme look)',
       onclick: () => quickMemeBanner(),
     }),
     el('button', {
-      class: 'btn sm qs-btn', text: '◐ B&W', title: 'Black & white on selected video (or first video clip)',
+      class: 'btn sm qs-btn', text: '◐ Black & white', title: 'Black & white on selected video (or first video clip)',
       onclick: () => quickEffect('bw'),
     }),
     el('button', {
-      class: 'btn sm qs-btn', text: '◻ Contain', title: 'No crop — letterbox video to fit',
+      class: 'btn sm qs-btn', text: '◻ Fit whole frame', title: 'No crop — letterbox video to fit',
       onclick: () => quickFit('contain'),
     }),
     el('button', {
       class: 'btn sm qs-btn', text: '↺ Reset look', title: 'Reset fit/zoom/focus/effect on selected media',
       onclick: () => quickResetLook(),
     }),
-    el('span', { class: 'qs-hint', text: 'Select a clip on the timeline first — controls open in Clip Tools →' })
+    el('span', { class: 'qs-hint', text: 'Tip: click a clip on the timeline first — its controls open in Clip Tools.' })
   );
 
   const center = el('div', { class: 'preview-center' },
+    el('div', { class: 'region-hint', style: 'margin:8px 12px 0', html: 'This is your <b>Reel</b>. Press <b>Space</b> to play. Drag the red line (playhead) to scrub.' }),
     el('div', { class: 'preview-stage' }, frame),
     zoomBar,
     quickStyle,
@@ -415,12 +438,13 @@ function buildUi(root) {
 
   const instruction = el('textarea', {
     class: 'input', rows: 5,
+    'aria-label': 'Instructions for OpenCode',
     placeholder: 'Instructions for OpenCode, e.g.\nCreate a 25 second Reel using this style. Strong first 2 seconds. Fast cuts. Sync important cuts to music. Add bold captions.',
   });
   const quick = el('div', { class: 'quick-actions' },
     ['Make this 25 seconds.', 'Strong first 2 seconds.', 'Sync cuts to the music.', 'Add bold captions.', 'Make the middle faster.', 'Remove boring sections.', 'Make the ending stronger.', 'Use the Dark Motivation style.']
       .map((q) => {
-        const c = el('span', { class: 'chip', text: q });
+        const c = el('button', { type: 'button', class: 'chip', text: q });
         c.addEventListener('click', () => { instruction.value = instruction.value ? `${instruction.value}\n${q}` : q; instruction.focus(); });
         return c;
       })
@@ -432,7 +456,7 @@ function buildUi(root) {
       const { files } = await api(`/api/projects/${S.project.id}/inbox`);
       inboxList.innerHTML = '';
       if (!files.length) {
-        inboxList.append(el('div', { class: 'muted', style: 'font-size:11px', text: 'No instructions saved yet.' }));
+        inboxList.append(el('div', { class: 'muted', text: 'No instructions saved yet.' }));
         return;
       }
       for (const f of files.slice(-6).reverse()) {
@@ -482,6 +506,7 @@ function buildUi(root) {
       diskBanner,
       el('div', { class: 'dir-section clip-tools' },
         el('h4', { class: 'section-hot' }, 'Inspector'),
+        el('div', { class: 'region-hint', html: 'Click a clip on the timeline to edit it here — size, color, speed, fades.' }),
         el('div', { id: 'inspector' })
       ),
       el('div', { class: 'dir-section' },
@@ -507,17 +532,19 @@ function buildUi(root) {
   /* ---- timeline ---- */
   const tlToolbar = el('div', { class: 'tl-toolbar' },
     el('span', { class: 'muted', style: 'font-size:11px', text: 'TIMELINE' }),
-    btn('Split', '', doSplit, 'sm'),
-    btn('＋ Text', '', doAddText, 'sm'),
+    el('span', { class: 'region-hint', style: 'margin:0 6px;flex:1;min-width:0', html: 'Click a colored bar to edit it. Drag its edges to trim.' }),
+    btn('Split', 'Cut the selected clip in two at the playhead (S)', doSplit, 'sm'),
+    btn('＋ Text', 'Add a title or caption', doAddText, 'sm'),
     el('div', { class: 'spacer' }),
     el('span', { class: 'muted', style: 'font-size:11px', id: 'tlDur', text: '' }),
-    btn('⤢ Tall', 'Toggle taller timeline for precision editing', () => {
+    btn('⤢ Taller', 'Make timeline taller for precision editing', () => {
       const w = document.querySelector('.timeline-wrap');
       if (w) { w.classList.toggle('tall'); fitPreviewFrame(); }
     }),
     el('input', {
       type: 'range', min: '20', max: '200', value: String(S.pps), style: 'width:110px',
       title: 'Timeline zoom',
+      'aria-label': 'Timeline zoom',
       oninput: (e) => { S.pps = Number(e.target.value); renderTimeline(); },
     })
   );
@@ -573,6 +600,7 @@ function layoutControls() {
     class: `btn sm layout-btn ${mode === value ? 'primary' : ''}`,
     text: label,
     title,
+    'aria-pressed': mode === value ? 'true' : 'false',
     onclick: () => setLayout(value),
   });
   return el('div', { class: 'layout-controls', title: 'Screen layout' },
@@ -778,6 +806,8 @@ function buildZoomBar() {
     type: 'button',
     text: label,
     title,
+    'aria-label': title,
+    'aria-pressed': (S.previewZoom === val || (typeof val === 'number' && S.previewZoom === val)) ? 'true' : 'false',
     class: S.previewZoom === val || (typeof val === 'number' && S.previewZoom === val) ? 'on' : '',
     onclick: () => setPreviewZoom(val),
   });
@@ -792,6 +822,8 @@ function buildZoomBar() {
       type: 'button',
       text: '📱 6.3"',
       title: 'Draggable 6.3" phone preview (live) — shortcut P',
+      'aria-label': 'Toggle phone preview',
+      'aria-pressed': S.phoneOpen ? 'true' : 'false',
       class: S.phoneOpen ? 'on' : '',
       onclick: () => setPhoneOpen(!S.phoneOpen),
     }),
@@ -855,7 +887,7 @@ function ensurePhonePreview() {
     el('span', { class: 'pp-grip', text: '⠿' }),
     el('span', { class: 'pp-drag-label', text: '6.3" live · drag' }),
     el('button', {
-      class: 'pp-close', type: 'button', text: '✕', title: 'Hide phone (P / Esc)',
+      class: 'pp-close', type: 'button', text: '✕', title: 'Hide phone (P / Esc)', 'aria-label': 'Hide phone preview',
       onclick: (e) => { e.stopPropagation(); setPhoneOpen(false); },
     })
   );
@@ -1747,13 +1779,13 @@ function renderTimeline() {
   for (const track of S.timeline.tracks) {
     const def = { v1: 'V1', v2: 'V2', v3: 'V3', a1: 'A1', a2: 'A2', a3: 'A3', t1: 'T1', t2: 'T2' }[track.id];
     const row = el('div', { class: `tl-track ${track.hidden ? 'hidden-track' : ''} ${track.locked ? 'locked-track' : ''}` });
-    const lockBtn = el('button', { class: `tbtn ${track.locked ? 'on' : ''}`, text: '🔒', title: 'Lock' });
+    const lockBtn = el('button', { class: `tbtn ${track.locked ? 'on' : ''}`, text: '🔒', title: 'Lock — stop moves & trims on this track', 'aria-label': `Lock ${def} track`, 'aria-pressed': track.locked ? 'true' : 'false' });
     lockBtn.addEventListener('click', () => {
       setTrackProps(S.timeline, track.id, { locked: !track.locked });
       commit();
       renderTimeline();
     });
-    const hideBtn = el('button', { class: `tbtn ${track.hidden ? 'on' : ''}`, text: '👁', title: 'Hide' });
+    const hideBtn = el('button', { class: `tbtn ${track.hidden ? 'on' : ''}`, text: '👁', title: 'Hide — remove this track from the preview', 'aria-label': `Hide ${def} track`, 'aria-pressed': track.hidden ? 'true' : 'false' });
     hideBtn.addEventListener('click', () => {
       setTrackProps(S.timeline, track.id, { hidden: !track.hidden });
       commit();
@@ -1761,7 +1793,7 @@ function renderTimeline() {
       updatePreviewText(true);
       syncMedia(true);
     });
-    const muteBtn = el('button', { class: `tbtn ${track.muted ? 'on' : ''}`, text: 'M', title: 'Mute' });
+    const muteBtn = el('button', { class: `tbtn ${track.muted ? 'on' : ''}`, text: 'M', title: 'Mute — silence this audio track', 'aria-label': `Mute ${def} track`, 'aria-pressed': track.muted ? 'true' : 'false' });
     muteBtn.addEventListener('click', () => {
       setTrackProps(S.timeline, track.id, { muted: !track.muted });
       commit();
@@ -1774,7 +1806,17 @@ function renderTimeline() {
       : track.type === 'audio'
         ? audioRole
         : (track.id === 't1' ? 'Text' : 'Captions');
-    const label = el('div', { class: 'tl-label' },
+    const trackHints = {
+      v1: 'Main video — drag clips here',
+      v2: 'Floating overlay images',
+      v3: 'Second video / images (split layouts)',
+      a1: 'Voice / narration',
+      a2: 'Music',
+      a3: 'Sound effects',
+      t1: 'Titles and text',
+      t2: 'Burned-in captions (exported to .srt)',
+    };
+    const label = el('div', { class: 'tl-label', title: trackHints[track.id] || track.id },
       el('span', { class: 'track-name', text: `${def} ${roleLabel}` }),
       ...(track.type === 'audio' ? [muteBtn] : []),
       hideBtn, lockBtn
@@ -2490,8 +2532,8 @@ function renderInspector(focusText = false) {
       el('div', { class: 'inspector-empty' },
         el('div', { class: 'ie-icon', text: '▣' }),
         el('div', { class: 'ie-title', text: 'Click a clip on the timeline' }),
-        el('div', { class: 'ie-sub', text: 'Selected clip opens Fit/size, Color effect, Text banner (meme), speed & more here.' }),
-        el('div', { class: 'ie-hint', text: 'Quick looks: ▣ Top banner · ◐ B&W · ◻ Contain — use the Style bar under the preview.' })
+        el('div', { class: 'ie-sub', text: 'Size, color, speed, fades, and text styles open here for the selected clip.' }),
+        el('div', { class: 'ie-hint', text: 'Quick looks: Top title bar · Black & white · Fit whole frame — use the Style bar under the preview.' })
       )
     );
     return;
@@ -2516,7 +2558,7 @@ function renderInspector(focusText = false) {
   const grid = el('div', { class: 'insp-grid' },
     num('Start (s)', clip.start, (v) => apply(() => moveClip(S.timeline, track.id, clip.id, v))),
     num('Duration (s)', clip.duration, (v) => apply(() => trimClip(S.timeline, track.id, clip.id, { duration: v }))),
-    clip.kind !== 'text' ? num('Source in (s)', clip.srcIn, (v) => apply(() => trimClip(S.timeline, track.id, clip.id, { srcIn: v })), '0.1', '0') : null,
+    clip.kind !== 'text' ? num('Start inside clip (s)', clip.srcIn, (v) => apply(() => trimClip(S.timeline, track.id, clip.id, { srcIn: v })), '0.1', '0') : null,
     (clip.kind === 'audio' || clip.kind === 'video') ? num('Volume (0–4)', clip.volume, (v) => apply(() => setClipProps(S.timeline, track.id, clip.id, { volume: v })), '0.05', '0') : null,
     (clip.kind === 'audio' || clip.kind === 'video')
       ? el('label', { class: 'field' }, el('span', { text: `Speed (${MIN_SPEED}–${MAX_SPEED}×)` }),
@@ -2549,23 +2591,33 @@ function renderInspector(focusText = false) {
       ? el('div', { class: 'field kf-field' },
           el('span', { text: 'Keyframes (at playhead)' }),
           el('div', { class: 'speed-row' },
-            ...KEYFRAME_PROPS.map((prop) => el('button', {
-              class: 'btn sm',
-              title: `Add ${prop} keyframe at playhead`,
-              text: `+${prop}`,
-              onclick: () => apply(() => {
-                const localT = Math.max(0, round3(S.playhead - clip.start));
-                const cur = currentKfValue(clip, prop, localT);
-                const existing = clip.keyframes?.[prop] || [];
-                const next = existing.filter((p) => Math.abs(p.t - localT) > 0.001);
-                next.push({ t: localT, v: cur });
-                next.sort((a, b) => a.t - b.t);
-                const kf = { ...(clip.keyframes || {}), [prop]: next };
-                setClipProps(S.timeline, track.id, clip.id, { keyframes: kf });
-              }),
-            })),
+            ...KEYFRAME_PROPS.map((prop) => {
+              const kfLabels = { scale: '+ Size', posX: '+ Move X', posY: '+ Move Y', opacity: '+ Opacity', volume: '+ Volume' };
+              const kfTips = {
+                scale: 'Animate size over time from this point',
+                posX: 'Animate horizontal position over time',
+                posY: 'Animate vertical position over time',
+                opacity: 'Animate opacity (transparency) over time',
+                volume: 'Animate volume over time',
+              };
+              return el('button', {
+                class: 'btn sm',
+                title: kfTips[prop] || `Add ${prop} keyframe at playhead`,
+                text: kfLabels[prop] || `+${prop}`,
+                onclick: () => apply(() => {
+                  const localT = Math.max(0, round3(S.playhead - clip.start));
+                  const cur = currentKfValue(clip, prop, localT);
+                  const existing = clip.keyframes?.[prop] || [];
+                  const next = existing.filter((p) => Math.abs(p.t - localT) > 0.001);
+                  next.push({ t: localT, v: cur });
+                  next.sort((a, b) => a.t - b.t);
+                  const kf = { ...(clip.keyframes || {}), [prop]: next };
+                  setClipProps(S.timeline, track.id, clip.id, { keyframes: kf });
+                }),
+              });
+            }),
             el('button', {
-              class: 'btn sm', text: 'Clear KFs',
+              class: 'btn sm', text: 'Clear animations', title: 'Remove all animated values (keyframes) on this clip',
               onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { keyframes: {} })),
             })
           ),
@@ -2585,7 +2637,7 @@ function renderInspector(focusText = false) {
     const yPct = el('input', { class: 'input', type: 'number', min: '0', max: '100', value: String(t.yPct ?? 50) });
     const size = el('input', { class: 'input', type: 'number', min: '8', max: '400', value: String(t.size || 72) });
     const color = el('input', { class: 'input', type: 'color', value: /^#[0-9a-fA-F]{6}$/.test(t.color || '') ? t.color : '#ffffff', style: 'padding:2px;height:32px' });
-    const bg = el('input', { class: 'input', type: 'text', value: t.bg || '', placeholder: 'e.g. white, #ffffff, black@0.55' });
+    const bg = el('input', { class: 'input', type: 'text', value: t.bg || '', placeholder: 'e.g. white, #ffffff, black@0.55', 'aria-label': 'Background color' });
     const bgMode = el('select', { class: 'input' },
       BG_MODES.map((m) => el('option', {
         value: m,
@@ -2656,13 +2708,13 @@ function renderInspector(focusText = false) {
       el('label', { class: 'field full' }, el('span', { text: 'Content' }), content),
       el('div', { class: 'full' }, el('div', { class: 'insp-sec' }, 'Premium styles')),
       el('div', { class: 'full style-presets' },
-        el('button', { class: 'btn sm primary', text: '▣ Top banner', title: 'Optimized full-width white top card', onclick: () => applyPreset('meme') }),
-        el('button', { class: 'btn sm', text: '📰 News', onclick: () => applyPreset('news') }),
-        el('button', { class: 'btn sm', text: '▭ Lower third', onclick: () => applyPreset('lower') }),
-        el('button', { class: 'btn sm', text: 'A Outline', onclick: () => applyPreset('outline') }),
-        el('button', { class: 'btn sm', text: '▮ Caption', onclick: () => applyPreset('caption') }),
-        el('button', { class: 'btn sm', text: '▰ Highlight', onclick: () => applyPreset('highlight') }),
-        el('button', { class: 'btn sm', text: 'Clear box', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { text: { bgMode: 'none', bg: '' } })) }),
+        el('button', { class: 'btn sm primary', text: '▣ Top title bar', title: 'Optimized full-width white top card', onclick: () => applyPreset('meme') }),
+        el('button', { class: 'btn sm', text: '📰 News', title: 'News-style headline block', onclick: () => applyPreset('news') }),
+        el('button', { class: 'btn sm', text: '▭ Lower third', title: 'Lower-third bar for names', onclick: () => applyPreset('lower') }),
+        el('button', { class: 'btn sm', text: 'A Outline', title: 'Outlined text', onclick: () => applyPreset('outline') }),
+        el('button', { class: 'btn sm', text: '▮ Caption', title: 'Caption bar', onclick: () => applyPreset('caption') }),
+        el('button', { class: 'btn sm', text: '▰ Highlight', title: 'Highlighted phrase', onclick: () => applyPreset('highlight') }),
+        el('button', { class: 'btn sm', text: 'Clear box', title: 'Remove background box from text', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { text: { bgMode: 'none', bg: '' } })) }),
       ),
       el('div', { class: 'full' }, el('div', { class: 'insp-sec' }, 'Layout')),
       el('label', { class: 'field' }, el('span', { text: 'Role' }), role),
@@ -2734,7 +2786,7 @@ function renderInspector(focusText = false) {
       el('div', { class: 'full', style: 'display:flex;gap:6px;flex-wrap:wrap' },
         el('button', { class: 'btn sm', text: 'Reset transform', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { fit: 'cover', scale: 1, posX: 50, posY: 50, effect: 'none' })) }),
         el('button', { class: 'btn sm', text: 'No crop (contain)', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { fit: 'contain', scale: 1, posX: 50, posY: 50 })) }),
-        el('button', { class: 'btn sm primary', text: 'Make B&W', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { effect: 'bw' })) }),
+        el('button', { class: 'btn sm primary', text: 'Make black & white', title: 'Apply black & white color effect', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { effect: 'bw' })) }),
       ),
     );
   }
@@ -2837,6 +2889,12 @@ function updateTimeLabel() {
   const dur = timelineDuration(S.timeline);
   const label = document.querySelector('.transport-time');
   if (label) label.textContent = `${fmtDuration(S.playhead)} / ${fmtDuration(dur)}`;
+  const scrubEl = document.querySelector('.scrub');
+  if (scrubEl) {
+    scrubEl.setAttribute('aria-valuemax', String(Math.max(0, Math.round(dur * 10) / 10)));
+    scrubEl.setAttribute('aria-valuenow', String(Math.max(0, Math.round(S.playhead * 10) / 10)));
+    scrubEl.setAttribute('aria-valuetext', `${fmtDuration(S.playhead)} of ${fmtDuration(dur)}`);
+  }
   const fill = document.querySelector('.scrub .fill');
   const head = document.querySelector('.scrub .head');
   const f = dur > 0 ? (S.playhead / dur) * 100 : 0;
@@ -3266,7 +3324,7 @@ function showRenderResult({ qc, kind, job }) {
       }) : null,
       kind === 'final' ? el('a', { class: 'btn sm', href: `${base}/timeline.json`, download: 'timeline.json', text: 'Timeline' }) : null,
       el('button', { class: 'btn sm ghost', text: 'All exports', onclick: () => navigate('#/exports') }),
-      el('button', { class: 'btn sm ghost', text: '✕', onclick: () => panel.remove() })
+      el('button', { class: 'btn sm ghost', text: '✕', title: 'Close render result', 'aria-label': 'Close render result', onclick: () => panel.remove() })
     ),
     job?.duration ? el('div', { class: 'muted', style: 'font-size:11px;margin-top:6px', text: `${job.duration}s · progress bar done` }) : null
   );

@@ -8,13 +8,14 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%23111'/><rect x='30' y='18' width='40' height='64' rx='6' fill='none' stroke='%23e8b44a' stroke-width='6'/></svg>" />
 </head>
 <body>
+  <a class="skip-link" href="#view">Skip to content</a>
   <div id="app">
     <header class="topbar">
-      <div class="brand" data-nav="projects">
-        <span class="brand-mark"></span>
+      <div class="brand" data-nav="projects" role="button" tabindex="0" aria-label="Go to Projects">
+        <span class="brand-mark" aria-hidden="true"></span>
         <span class="brand-name">REEL WORKBENCH</span>
       </div>
-      <nav class="mainnav" id="mainnav">
+      <nav class="mainnav" id="mainnav" aria-label="Main">
         <a href="#/projects" data-view="projects">Projects</a>
         <a href="#/media" data-view="media">Media</a>
         <a href="#/references" data-view="references">References</a>
@@ -24,13 +25,14 @@
       </nav>
       <div class="topbar-right">
         <span class="env-pill" id="envPill" title="FFmpeg environment">…</span>
-        <a href="#/settings" class="icon-btn" title="Settings" data-view="settings">⚙</a>
+        <button type="button" class="icon-btn help-btn" id="helpBtn" title="Help &amp; keyboard shortcuts (?)" aria-label="Help and keyboard shortcuts">?</button>
+        <a href="#/settings" class="icon-btn" title="Settings" aria-label="Settings" data-view="settings">⚙</a>
       </div>
     </header>
 
-    <main id="view" class="view"></main>
+    <main id="view" class="view" tabindex="-1"></main>
 
-    <div id="toast" class="toast hidden"></div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
     <div id="modalRoot" class="modal-root hidden"></div>
     <div id="paletteRoot" class="palette-root hidden"></div>
   </div>

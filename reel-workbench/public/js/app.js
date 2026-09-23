@@ -59,8 +59,17 @@ async function route() {
   if (currentView === 'editor' && name !== 'editor') editorCleanup();
   currentView = name;
   document.querySelectorAll('#mainnav a').forEach((a) => {
-    a.classList.toggle('active', a.dataset.view === name);
+    const on = a.dataset.view === name;
+    a.classList.toggle('active', on);
+    if (on) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
   });
+  const gear = document.querySelector('.topbar-right a[data-view="settings"]');
+  if (gear) {
+    const on = name === 'settings';
+    if (on) gear.setAttribute('aria-current', 'page');
+    else gear.removeAttribute('aria-current');
+  }
   const root = viewRoot();
   root.innerHTML = '';
   root.className = 'view';
@@ -109,9 +118,9 @@ async function renderProjects(root) {
   grid.append(newCard);
 
   for (const p of projects) {
-    const thumb = p.thumbnail
-      ? el('img', { class: 'thumb', src: `/api/projects/${p.id}/exports/${encodeURIComponent(p.thumbnail.replace('exports/', ''))}`, onerror: function () { this.src = `/api/projects/${p.id}/poster?t=0`; } })
-      : el('img', { class: 'thumb', src: `/api/projects/${p.id}/poster?t=0`, onerror: function () { this.style.background = '#111'; this.removeAttribute('src'); } });
+        const thumb = p.thumbnail
+      ? el('img', { class: 'thumb', alt: `Thumbnail for ${p.name}`, src: `/api/projects/${p.id}/exports/${encodeURIComponent(p.thumbnail.replace('exports/', ''))}`, onerror: function () { this.src = `/api/projects/${p.id}/poster?t=0`; } })
+      : el('img', { class: 'thumb', alt: `Thumbnail for ${p.name}`, src: `/api/projects/${p.id}/poster?t=0`, onerror: function () { this.style.background = '#111'; this.removeAttribute('src'); } });
 
     const statusBadge = p.renderJob && ['queued', 'processing'].includes(p.renderJob.status)
       ? el('span', { class: 'badge warn', text: `rendering ${p.renderJob.progress || 0}%` })
@@ -128,6 +137,7 @@ async function renderProjects(root) {
     const statusSel = el('select', {
       class: 'input status-sel',
       title: 'Project status',
+      'aria-label': `Project status for ${p.name}`,
       onchange: async (e) => {
         try {
           await api(`/api/projects/${p.id}`, { method: 'PATCH', body: { status: e.target.value } });
@@ -210,7 +220,29 @@ async function renderProjects(root) {
     grid,
     projects.length === 0 ? el('div', { class: 'empty', style: 'margin-top:20px' },
       el('div', { class: 'big', text: 'No projects yet' }),
-      el('div', { text: 'Create a project, import your clips, then open the Editor.' })
+      el('div', { text: 'Create a project, import your clips, then open the Editor.' }),
+      el('div', { class: 'start-steps', style: 'margin-top:16px' },
+        el('div', { class: 'start-step' },
+          el('div', { class: 'n', text: '1' }),
+          el('div', { class: 't', text: 'Create' }),
+          el('div', { class: 'd', text: 'Click New Project above.' })
+        ),
+        el('div', { class: 'start-step' },
+          el('div', { class: 'n', text: '2' }),
+          el('div', { class: 't', text: 'Import' }),
+          el('div', { class: 'd', text: 'Add videos, photos, or music in Media.' })
+        ),
+        el('div', { class: 'start-step' },
+          el('div', { class: 'n', text: '3' }),
+          el('div', { class: 't', text: 'Edit' }),
+          el('div', { class: 'd', text: 'Drag clips onto the timeline in the Editor.' })
+        ),
+        el('div', { class: 'start-step' },
+          el('div', { class: 'n', text: '4' }),
+          el('div', { class: 't', text: 'Render' }),
+          el('div', { class: 'd', text: 'Press Render final, then download in Exports.' })
+        )
+      )
     ) : null
   );
 }
@@ -310,8 +342,17 @@ async function renderExports(root) {
       el('span', { class: 'sub', text: 'Rendered previews, finals, thumbnails and captions' })
     ),
     projects.length === 0
-      ? el('div', { class: 'empty' }, el('div', { class: 'big', text: 'No projects yet' }))
-      : table
+      ? el('div', { class: 'empty' },
+          el('div', { class: 'big', text: 'No projects yet' }),
+          el('div', { text: 'Create a project and render it — files show up here.' })
+        )
+      : (rows.every((r) => !r.files.exports.length && !r.files.previews.length)
+          ? el('div', { class: 'empty' },
+              el('div', { class: 'big', text: 'Nothing rendered yet' }),
+              el('div', { text: 'Open a project in the Editor and press Render final or Quick preview.' }),
+              table
+            )
+          : table)
   );
 }
 
@@ -345,9 +386,9 @@ async function renderSettings(root) {
   const form = el('div', { class: 'card', style: 'max-width:520px' },
     el('h3', { text: 'Render defaults' }),
     el('div', { class: 'insp-grid' },
-      el('label', { class: 'field' }, el('span', { text: 'CRF (lower = better)' }), crf),
-      el('label', { class: 'field' }, el('span', { text: 'Preset' }), preset),
-      el('label', { class: 'field' }, el('span', { text: 'Audio bitrate' }), abr),
+      el('label', { class: 'field' }, el('span', { text: 'Quality (lower = better, larger file)' }), crf),
+      el('label', { class: 'field' }, el('span', { text: 'Speed vs quality (Preset)' }), preset),
+      el('label', { class: 'field' }, el('span', { text: 'Sound quality (bitrate)' }), abr),
       el('label', { class: 'field' }, el('span', { text: 'Default FPS' }), fps)
     ),
     el('div', { style: 'margin-top:12px' },
@@ -401,6 +442,10 @@ async function boot() {
     }
   });
   document.querySelector('.brand').addEventListener('click', () => navigate('#/projects'));
+  document.querySelector('.brand')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('#/projects'); }
+  });
+  document.getElementById('helpBtn')?.addEventListener('click', () => openHelp());
   if (!location.hash) location.hash = '#/projects';
   route();
 }

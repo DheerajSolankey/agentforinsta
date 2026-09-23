@@ -75,13 +75,13 @@ function importDropzone(opts) {
 
 function assetThumb(a) {
   return a.thumb
-    ? el('img', { src: a.thumb, alt: '', loading: 'lazy' })
+    ? el('img', { src: a.thumb, alt: `Preview of ${a.filename || a.original_filename || 'media'}`, loading: 'lazy' })
     : el('div', { class: 'mi-thumb', text: catIcon(a.category) });
 }
 
 function editMediaModal(a, onDone) {
   const name = el('input', { class: 'input', value: a.filename });
-  const tags = el('input', { class: 'input', value: (a.tags || []).join(', '), placeholder: 'tag1, tag2' });
+  const tags = el('input', { class: 'input', value: (a.tags || []).join(', '), placeholder: 'tag1, tag2', 'aria-label': 'Tags (comma separated)' });
   const rights = el('select', { class: 'input' },
     ['OWNED', 'LICENSED', 'USER_PROVIDED_WITH_PERMISSION', 'PUBLIC_DOMAIN_OR_PERMITTED', 'REFERENCE_ONLY', 'UNKNOWN']
       .map((r) => el('option', { value: r, selected: r === a.rights_status || undefined }, r))
@@ -222,11 +222,11 @@ function mediaActions(a, { onDone, isReference = false }) {
 }
 
 async function analyzeModal(asset, onDone) {
-  const nameInput = el('input', { class: 'input', value: `Style from ${asset.filename}` });
+  const nameInput = el('input', { class: 'input', value: `Style from ${asset.filename}`, 'aria-label': 'Draft style name' });
   const out = el('div', { class: 'muted', text: 'Local FFmpeg analysis: scene cuts, pacing, visual stats, audio energy…' });
-  const analyzeBtn = el('button', { class: 'btn primary', text: 'Analyze' });
+  const analyzeBtn = el('button', { class: 'btn primary', type: 'button', text: 'Analyze' });
   const pre = el('pre', { class: 'code', style: 'display:none;max-height:34vh' });
-  const saveName = el('input', { class: 'input', placeholder: 'Style name (e.g. My Dark Motivation)' });
+  const saveName = el('input', { class: 'input', placeholder: 'Style name (e.g. My Dark Motivation)', 'aria-label': 'Style name to save' });
   let draft = null;
 
   analyzeBtn.addEventListener('click', async () => {
@@ -283,7 +283,7 @@ async function analyzeModal(asset, onDone) {
 }
 
 function urlImportModal(asReference, onDone) {
-  const url = el('input', { class: 'input', placeholder: 'https://example.com/file.mp4 (direct media file URL)' });
+  const url = el('input', { class: 'input', placeholder: 'https://example.com/file.mp4 (direct media file URL)', 'aria-label': 'Direct media file URL' });
   const note = el('p', {
     class: 'muted',
     style: 'font-size:11.5px;margin-top:8px;line-height:1.5',
@@ -345,7 +345,7 @@ async function buildLibrary(root, { category: initCat, referenceMode }) {
       listWrap.append(
         el('div', { class: 'card media-card' },
           el('div', { class: 'row1' },
-            a.thumb ? el('img', { class: 'thumb-sq', src: a.thumb, loading: 'lazy' }) : el('div', { class: 'ic-sq', text: catIcon(a.category) }),
+            a.thumb ? el('img', { class: 'thumb-sq', src: a.thumb, alt: `Preview of ${a.filename}`, loading: 'lazy' }) : el('div', { class: 'ic-sq', text: catIcon(a.category) }),
             el('div', { class: 'info' },
               el('div', { class: 'fname', text: a.filename }),
               el('div', { class: 'fmeta' },
@@ -370,21 +370,33 @@ async function buildLibrary(root, { category: initCat, referenceMode }) {
     ? [{ id: 'reference', label: 'Reference Reels' }]
     : [{ id: 'all', label: 'All' }, ...CATEGORIES.map((c) => ({ id: c, label: catLabel(c) })), { id: 'reference', label: 'References' }];
   for (const c of cats) {
-    const chip = el('span', { class: `chip ${c.id === cat ? 'active' : ''}`, text: c.label });
+    const chip = el('button', {
+      type: 'button',
+      class: `chip ${c.id === cat ? 'active' : ''}`,
+      text: c.label,
+      'aria-pressed': c.id === cat ? 'true' : 'false',
+    });
     chip.addEventListener('click', () => {
       if (c.id === 'reference' && !referenceMode) {
         location.hash = '#/references';
         return;
       }
       cat = c.id;
-      chips.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+      chips.querySelectorAll('.chip').forEach((x) => {
+        x.classList.remove('active');
+        x.setAttribute('aria-pressed', 'false');
+      });
       chip.classList.add('active');
+      chip.setAttribute('aria-pressed', 'true');
       refresh();
     });
     chips.append(chip);
   }
 
-  const search = el('input', { class: 'input', placeholder: 'Search name or tags…', style: 'max-width:240px' });
+  const search = el('input', {
+    class: 'input', placeholder: 'Search name or tags…', 'aria-label': 'Search media by name or tags',
+    style: 'max-width:240px',
+  });
   search.addEventListener('input', () => {
     q = search.value.trim();
     refresh();

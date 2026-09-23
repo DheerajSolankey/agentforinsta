@@ -5,10 +5,16 @@ export async function renderStylesView(root) {
   root.classList.add('pad');
   let tab = 'styles';
 
-  const tabs = el('div', { class: 'tabs' });
+  const tabs = el('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Styles or templates' });
   const body = el('div', {});
   const mkTab = (id, label) => {
-    const b = el('button', { class: tab === id ? 'active' : '', text: label });
+    const b = el('button', {
+      type: 'button',
+      class: tab === id ? 'active' : '',
+      text: label,
+      role: 'tab',
+      'aria-selected': tab === id ? 'true' : 'false',
+    });
     b.addEventListener('click', () => { tab = id; draw(); });
     return b;
   };
@@ -45,7 +51,7 @@ async function drawStyles(body) {
     el('button', {
       class: 'btn', text: 'Import JSON',
       onclick: () => {
-        const ta = el('textarea', { class: 'input', rows: 8, placeholder: '{ "name": "My Style", "pacing": { … } }' });
+        const ta = el('textarea', { class: 'input', rows: 8, placeholder: '{ "name": "My Style", "pacing": { … } }', 'aria-label': 'Style JSON to import' });
         modal({
           title: 'Import style JSON',
           body: ta,
@@ -128,6 +134,14 @@ async function drawStyles(body) {
         )
       )
     );
+  }
+
+  if (!styles.length) {
+    body.append(toolbar, el('div', { class: 'empty' },
+      el('div', { class: 'big', text: 'No styles yet' }),
+      el('div', { text: 'Create a style, import JSON, or Analyze a reference Reel to generate one.' })
+    ));
+    return;
   }
 
   body.append(toolbar, grid);
@@ -319,6 +333,13 @@ async function drawTemplates(body) {
         )
       )
     );
+  }
+  if (!templates?.length) {
+    body.append(el('div', { class: 'empty' },
+      el('div', { class: 'big', text: 'No templates yet' }),
+      el('div', { text: 'Templates scaffold Hook → Story → CTA text on your timeline.' })
+    ));
+    return;
   }
   body.append(
     el('div', { class: 'help-line', style: 'margin-bottom:12px', text: 'Templates scaffold NARRATIVE STRUCTURE as editable text clips. They do not replace styles.' }),
