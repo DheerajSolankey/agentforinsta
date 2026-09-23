@@ -4,7 +4,7 @@ import {
   buildProgramSegments, overlayClipsOf, textClipsOf, audioClipsOf,
   videoClipAudios, buildSrt, validateForRender, RenderError, atempoChain,
   splitPaneClipsOf, buildFitFilter, buildEffectFilter,
-  buildTextAlpha, buildTextX,
+  buildTextAlpha, buildTextX, buildTextY,
 } from '../server/renderer.js';
 import { createTimeline, addClip, timelineDuration, round3, setLayoutMode } from '../shared/timeline-ops.js';
 
@@ -158,21 +158,35 @@ test('buildFitFilter: cover/contain/fill + zoom/focus', () => {
   assert.ok(defaults.includes('crop=1080:1920'));
 });
 
-test('buildEffectFilter: bw / none / vivid', () => {
+test('buildEffectFilter: bw / none / vivid / looks', () => {
   assert.equal(buildEffectFilter({ effect: 'bw' }), 'hue=s=0');
   assert.equal(buildEffectFilter({ effect: 'none' }), '');
   assert.equal(buildEffectFilter({}), '');
   assert.ok(buildEffectFilter({ effect: 'vivid' }).includes('contrast'));
   assert.ok(buildEffectFilter({ effect: 'sepia' }).includes('colorchannelmixer'));
+  assert.ok(buildEffectFilter({ effect: 'vintage' }).includes('eq='));
+  assert.ok(buildEffectFilter({ effect: 'teal' }).includes('colorbalance'));
+  assert.ok(buildEffectFilter({ effect: 'golden' }).includes('gamma_r'));
+  assert.ok(buildEffectFilter({ effect: 'noir' }).includes('hue=s=0'));
+  assert.ok(buildEffectFilter({ effect: 'neon' }).includes('saturation=1.55'));
+  assert.ok(buildEffectFilter({ effect: 'luxury' }).includes('gamma_r'));
 });
 
-test('buildTextAlpha / buildTextX for premium text', () => {
+test('buildTextAlpha / buildTextX / buildTextY for premium text', () => {
   assert.equal(buildTextAlpha('none', 0, 2), null);
   assert.equal(buildTextAlpha('fade', 0, 0.1, 0.3), null);
   const fade = buildTextAlpha('fade', 0, 2, 0.25);
   assert.ok(typeof fade === 'string' && fade.includes('lt(t,'));
   const pop = buildTextAlpha('pop', 1, 3, 0.3);
   assert.ok(typeof pop === 'string' && pop.includes('((t-1)'));
+  assert.ok(typeof buildTextAlpha('slide-up', 0, 2, 0.3) === 'string');
+  assert.ok(typeof buildTextAlpha('bounce', 0, 2, 0.3) === 'string');
+  assert.ok(typeof buildTextAlpha('zoom-in', 0, 2, 0.3) === 'string');
+
+  const ySlide = buildTextY('slide-up', 0, 0.3, '(h-text_h)*50/100');
+  assert.ok(ySlide.includes('+48*max'));
+  assert.equal(buildTextY('fade', 0, 0.3, 'BASE'), 'BASE');
+  assert.equal(buildTextY('slide-down', 1, 0.2, 'B'), 'B+-48*max(0,1-(t-1)/0.2)');
 
   assert.equal(buildTextX('center', 50, 40), '(w-text_w)*50/100');
   assert.equal(buildTextX('left', 50, 40), '40');

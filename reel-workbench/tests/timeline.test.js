@@ -353,7 +353,7 @@ test('transform: makeClip defaults, setClipProps fit/scale/pos, validate', () =>
 });
 
 test('effects: normalize, setClipProps, validate', () => {
-  assert.deepEqual(EFFECTS, ['none', 'bw', 'sepia', 'warm', 'cool', 'vivid']);
+  assert.deepEqual(EFFECTS, ['none', 'bw', 'sepia', 'warm', 'cool', 'vivid', 'vintage', 'teal', 'golden', 'noir', 'neon', 'luxury']);
   assert.equal(normalizeEffect('bw'), 'bw');
   assert.equal(normalizeEffect('nope'), 'none');
   assert.equal(normalizeBgMode('full'), 'full');
@@ -373,7 +373,7 @@ test('effects: normalize, setClipProps, validate', () => {
 
   const bad = cloneTimeline(tl());
   const b = addClip(bad, 'v1', { kind: 'video', assetId: 'media-0001', start: 0, duration: 1, srcIn: 0, volume: 1 });
-  b.effect = 'neon';
+  b.effect = 'ultra-glow';
   assert.ok(validateTimeline(bad).some((i) => i.code === 'BAD_EFFECT'));
 
   const text = makeClip({
@@ -394,7 +394,7 @@ test('effects: normalize, setClipProps, validate', () => {
 });
 
 test('text premium: presets, anim/align normalize, banner sizing', () => {
-  assert.deepEqual(TEXT_ANIMS, ['none', 'fade', 'pop']);
+  assert.deepEqual(TEXT_ANIMS, ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in']);
   assert.ok(TEXT_ALIGNS.includes('center'));
   assert.ok(TEXT_PRESETS.meme.bgMode === 'full');
   assert.ok(TEXT_PRESETS.outline.strokeWidth > 0);

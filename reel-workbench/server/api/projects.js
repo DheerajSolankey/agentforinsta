@@ -216,6 +216,7 @@ function applyStyleToTimeline(tl, style) {
 function effectFromStyleVisual(visual) {
   if (!visual) return null;
   if (visual.preset === 'dark') return 'cool';
+  if (visual.preset === 'luxury') return 'luxury';
   const con = visual.contrast;
   const sat = visual.saturation;
   if (con === 'high' && sat === 'high') return 'vivid';

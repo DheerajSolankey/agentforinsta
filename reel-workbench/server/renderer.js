@@ -114,13 +114,19 @@ export function buildEffectFilter(clip) {
     case 'warm': return 'eq=contrast=1.05:saturation=1.15:gamma_r=1.04:gamma_b=0.96';
     case 'cool': return 'eq=contrast=1.05:saturation=1.1:gamma_r=0.96:gamma_b=1.05';
     case 'vivid': return 'eq=contrast=1.18:saturation=1.35';
+    case 'vintage': return 'eq=contrast=0.92:saturation=0.78:brightness=0.04:gamma=1.05,colorbalance=rs=-0.08:bs=0.08:gm=0.03';
+    case 'teal': return 'eq=contrast=1.08:saturation=1.1,colorbalance=rs=0.12:gs=0.04:bs=-0.1:rm=-0.06:bm=0.1';
+    case 'golden': return 'eq=contrast=1.06:saturation=1.12:gamma_r=1.1:gamma_g=1.02:gamma_b=0.9';
+    case 'noir': return 'hue=s=0,eq=contrast=1.28:brightness=-0.02';
+    case 'neon': return 'eq=contrast=1.15:saturation=1.55:gamma=1.04,hue=h=8';
+    case 'luxury': return 'eq=contrast=1.12:saturation=1.05:gamma_r=1.06:gamma_b=0.94,colorbalance=rs=0.06:bs=-0.04';
     default: return '';
   }
 }
 
 /**
  * drawtext alpha expression for entrance animation.
- * fade: linear in over animDur; pop: quick ease-in over animDur.
+ * fade / pop / bounce / zoom-in / slide-* export as alpha (and optional y offset).
  * Exported for tests.
  */
 export function buildTextAlpha(anim, start, end, animDur = 0.3) {
@@ -131,14 +137,28 @@ export function buildTextAlpha(anim, start, end, animDur = 0.3) {
   const d = Math.max(0.05, round3(Number(animDur) || 0.3));
   if (e <= s + d) return null;
   if (a === 'fade') {
-    // 0 → 1 over [s, s+d], hold, 1 → 0 over [e-d, e]
     return `if(lt(t,${s}),0,if(lt(t,${round3(s + d)}),(t-${s})/${d},if(lt(t,${round3(e - d)}),1,(${e}-t)/${d})))`;
   }
-  // pop: faster snap-in with quadratic ease, gentle out
-  const dIn = Math.min(d, 0.18);
+  // pop / bounce / zoom-in / slide: snap-in with ease, gentle out
+  const dIn = Math.min(d, a === 'pop' ? 0.18 : a === 'bounce' ? 0.22 : a === 'zoom-in' ? 0.2 : 0.25);
   const dOut = Math.min(d, 0.22);
   if (e <= s + dIn + dOut) return null;
-  return `if(lt(t,${s}),0,if(lt(t,${round3(s + dIn)}),((t-${s})/${dIn})*((t-${s})/${dIn}),if(lt(t,${round3(e - dOut)}),1,(${e}-t)/${dOut})))`;
+  if (a === 'pop' || a === 'bounce' || a === 'zoom-in') {
+    return `if(lt(t,${s}),0,if(lt(t,${round3(s + dIn)}),((t-${s})/${dIn})*((t-${s})/${dIn}),if(lt(t,${round3(e - dOut)}),1,(${e}-t)/${dOut})))`;
+  }
+  // slide-up / slide-down: alpha ramps in while y moves
+  return `if(lt(t,${s}),0,if(lt(t,${round3(s + d)}),(t-${s})/${d},if(lt(t,${round3(e - d)}),1,(${e}-t)/${d})))`;
+}
+
+/** Optional y-offset expression for slide-up / slide-down text anims (px). Exported for tests. */
+export function buildTextY(anim, start, animDur = 0.3, baseY = '(h-text_h)*50/100') {
+  const a = normalizeTextAnim(anim);
+  if (a !== 'slide-up' && a !== 'slide-down') return baseY;
+  const s = round3(Number(start) || 0);
+  const d = Math.max(0.05, round3(Number(animDur) || 0.3));
+  const dist = a === 'slide-up' ? 48 : -48;
+  // offset from +dist → 0 over [s, s+d]
+  return `${baseY}+${dist}*max(0,1-(t-${s})/${d})`;
 }
 
 /** Horizontal x expression for drawtext (align-aware). Exported for tests. */
@@ -631,6 +651,8 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
       const strokeW = Math.max(0, Math.min(16, Math.round(Number(spec.strokeWidth) || 0)));
       const ls = Math.max(0, Math.round(Number(spec.letterSpacing) || 0));
       const alphaExpr = buildTextAlpha(spec.anim, start, end, spec.animDur);
+      const yBase = `(h-text_h)*${round3(yPct)}/100`;
+      const yExpr = buildTextY(spec.anim, start, spec.animDur, yBase);
 
       const drawCommon = [
         `fontfile='${escFilterPath(fontFile)}'`,
@@ -646,7 +668,7 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
         spec.shadow ? `shadowcolor=${hexColor(spec.strokeColor, '0x000000')}@0.75` : 'shadowcolor=black@0',
         `line_spacing=${Math.round(size * 0.12)}`,
         `x=${buildTextX(align, xPct, bgMode === 'full' ? padX : 8)}`,
-        `y=(h-text_h)*${round3(yPct)}/100`,
+        `y=${yExpr}`,
         enable,
       ];
       // note: this FFmpeg 9.0.2 build has no drawtext letter_spacing option — keep spacing in preview only
@@ -680,8 +702,11 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
           xCommon = `x=${boxX}+(boxW-text_w)*50/100`.replace('boxW', String(boxW));
         }
         // Vertical: center text in the strip (more reliable than pure yPct when multi-line).
+        const slideOff = (spec.anim === 'slide-up' || spec.anim === 'slide-down')
+          ? `+${spec.anim === 'slide-up' ? 48 : -48}*max(0,1-(t-${round3(start)})/${Math.max(0.05, round3(Number(spec.animDur) || 0.3))})`
+          : '';
         const opts = drawCommon.map((o) => {
-          if (o.startsWith('y=')) return `y=${boxY}+(${bannerH}-text_h)/2`;
+          if (o.startsWith('y=')) return `y=${boxY}+(${bannerH}-text_h)/2${slideOff}`;
           if (o.startsWith('x=')) return xCommon;
           return o;
         });

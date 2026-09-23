@@ -48,15 +48,14 @@ const S = {
   previewFrame: null,
   previewBadges: null,
   previewEmpty: null,
-  previewZoom: 'fit', // 'fit' | number (1 = original project pixels)
   selBox: null,
-  zoomHost: null,
   drag: null, // active canvas drag session
   multi: null, // extra multi-select picks [{trackId, clipId}] (primary is S.selection)
   snapGuides: null,
   phoneOpen: false,
   phoneEls: null,
   phonePos: null, // {x,y} viewport px
+  phoneBtn: null,
 };
 
 export function editorCleanup() {
@@ -75,6 +74,8 @@ export function editorCleanup() {
   }
   S.phoneEls = null;
   S.phoneOpen = false;
+  S.phoneBtn = null;
+  document.body.classList.remove('sheet-open');
 }
 
 export async function editorOpenProject(id) {
@@ -275,7 +276,7 @@ function buildUi(root) {
     },
   });
 
-  const leftPanel = el('div', { class: 'panel' },
+  const leftPanel = el('div', { class: 'panel left' },
     el('div', { class: 'panel-head', text: 'Media' }),
     el('div', { class: 'panel-body' },
       el('div', { class: 'region-hint', html: 'Drag a video onto the <b>timeline</b> below — or double-click to add at the red line.' }),
@@ -309,8 +310,6 @@ function buildUi(root) {
     el('div', { class: 'sg-v' }),
     el('div', { class: 'sg-h' })
   );
-  const zoomBar = buildZoomBar();
-  // Zoom lives on .preview-center (outside the frame) so Fit stays reachable at 150%+
   const frame = el('div', { class: 'preview-frame' }, video, img, video2, img2, overlayLayer, textLayer, guides, emptyState, badges, snapGuides, selBox);
   S.videoEl = video;
   S.imgEl = img;
@@ -321,7 +320,6 @@ function buildUi(root) {
   S.previewBadges = badges;
   S.previewEmpty = emptyState;
   S.selBox = selBox;
-  S.zoomHost = zoomBar;
   S.snapGuides = snapGuides;
   bindSelBox(selBox);
 
@@ -359,32 +357,118 @@ function buildUi(root) {
     el('span', { class: 'muted mono', style: 'font-size:10.5px', text: 'Space · S · M · L · Del · Ctrl+Z · Ctrl+K · ?' })
   );
 
-  // Always-visible quick style bar (works on selected clip / adds text if none)
+  // Always-visible quick actions (phone + looks + motion + text + PiP)
+  const phoneBtn = el('button', {
+    type: 'button',
+    class: 'btn sm qs-btn phone-toggle',
+    text: '📱 6.3"',
+    title: 'Draggable 6.3" phone preview (live) — shortcut P',
+    'aria-label': 'Toggle phone preview',
+    'aria-pressed': 'false',
+    onclick: () => setPhoneOpen(!S.phoneOpen),
+  });
+  S.phoneBtn = phoneBtn;
+
   const quickStyle = el('div', { class: 'quick-style', id: 'quickStyle' },
-    el('span', { class: 'qs-label', text: 'Style' }),
+    phoneBtn,
+    el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
+    el('span', { class: 'qs-label', text: 'Looks' }),
     el('button', {
       class: 'btn sm qs-btn', text: '▣ Top title bar', title: 'Add/select text + full-width white top banner (meme look)',
       onclick: () => quickMemeBanner(),
     }),
     el('button', {
-      class: 'btn sm qs-btn', text: '◐ Black & white', title: 'Black & white on selected video (or first video clip)',
+      class: 'btn sm qs-btn', text: '◐ B&W', title: 'Black & white on selected video (or first video clip)',
       onclick: () => quickEffect('bw'),
     }),
     el('button', {
-      class: 'btn sm qs-btn', text: '◻ Fit whole frame', title: 'No crop — letterbox video to fit',
+      class: 'btn sm qs-btn', text: '🎞 Vintage', title: 'Faded film look',
+      onclick: () => quickEffect('vintage'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '🌊 Teal', title: 'Teal & orange cinematic look',
+      onclick: () => quickEffect('teal'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '🌅 Golden', title: 'Warm golden-hour glow',
+      onclick: () => quickEffect('golden'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '🖤 Noir', title: 'High-contrast black & white',
+      onclick: () => quickEffect('noir'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '💜 Neon', title: 'Saturated neon pop',
+      onclick: () => quickEffect('neon'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '👑 Luxury', title: 'Premium warm gold grade',
+      onclick: () => quickEffect('luxury'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '◻ Fit', title: 'No crop — letterbox video to fit',
       onclick: () => quickFit('contain'),
     }),
     el('button', {
-      class: 'btn sm qs-btn', text: '↺ Reset look', title: 'Reset fit/zoom/focus/effect on selected media',
+      class: 'btn sm qs-btn', text: '↺ Reset', title: 'Reset fit/zoom/focus/effect on selected media',
       onclick: () => quickResetLook(),
     }),
-    el('span', { class: 'qs-hint', text: 'Tip: click a clip on the timeline first — its controls open in Clip Tools.' })
+    el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
+    el('span', { class: 'qs-label', text: 'Motion' }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '↗ Push-in', title: 'Slow zoom in over the selected clip',
+      onclick: () => applyMotionPreset('push-in'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '⚡ Punch', title: 'Fast hard zoom punch-in at start',
+      onclick: () => applyMotionPreset('punch'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '⟵ Reveal', title: 'Zoom out from close-up',
+      onclick: () => applyMotionPreset('reveal'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '🎞 Ken Burns', title: 'Slow pan across the frame',
+      onclick: () => applyMotionPreset('kenburns'),
+    }),
+    el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
+    el('span', { class: 'qs-label', text: 'Text' }),
+    el('button', {
+      class: 'btn sm qs-btn', text: 'Fade', title: 'Text fade in/out animation',
+      onclick: () => quickTextAnim('fade'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: 'Pop', title: 'Text pop-in animation',
+      onclick: () => quickTextAnim('pop'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: 'Slide ↑', title: 'Text slides up into place',
+      onclick: () => quickTextAnim('slide-up'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: 'Bounce', title: 'Text bounces in',
+      onclick: () => quickTextAnim('bounce'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: 'Zoom-in', title: 'Text zooms in from small',
+      onclick: () => quickTextAnim('zoom-in'),
+    }),
+    el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
+    el('span', { class: 'qs-label', text: 'Layout' }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '⧉ PiP corner', title: 'Make selected clip a picture-in-picture overlay (bottom-right)',
+      onclick: () => quickPip('br'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: 'PiP top-left', title: 'Picture-in-picture overlay top-left',
+      onclick: () => quickPip('tl'),
+    }),
+    el('span', { class: 'qs-hint', text: 'Tip: click a clip first — drag corners on canvas or open Clip Tools.' })
   );
 
   const center = el('div', { class: 'preview-center' },
-    el('div', { class: 'region-hint', style: 'margin:8px 12px 0', html: 'This is your <b>Reel</b>. Press <b>Space</b> to play. Drag the red line (playhead) to scrub.' }),
+    el('div', { class: 'region-hint', style: 'margin:8px 12px 0', html: 'This is your <b>Reel</b>. Press <b>Space</b> to play. Drag corners on the canvas to resize.' }),
     el('div', { class: 'preview-stage' }, frame),
-    zoomBar,
     quickStyle,
     transport
   );
@@ -500,6 +584,10 @@ function buildUi(root) {
   const dirPanel = el('div', { class: 'panel right' },
     el('div', { class: 'panel-head' },
       el('span', { text: 'Clip Tools' }),
+      el('button', {
+        class: 'btn sm ghost sheet-close', type: 'button', text: '✕', 'aria-label': 'Close Clip Tools',
+        onclick: () => document.body.classList.remove('sheet-open'),
+      }),
       el('span', { class: 'badge new', text: 'NEW' })
     ),
     el('div', { class: 'panel-body' },
@@ -555,6 +643,19 @@ function buildUi(root) {
   const footer = el('div', { class: 'editor-footer', id: 'editorFooter' });
 
   root.append(toolbar, el('div', { class: 'editor-main' }, leftPanel, center, dirPanel), tlWrap, footer);
+
+  // Mobile: floating "Edit clip" opens Clip Tools bottom sheet
+  const sheetFab = el('button', {
+    class: 'sheet-fab', type: 'button', text: '✎ Edit clip',
+    title: 'Open Clip Tools (bottom sheet on mobile)',
+    'aria-label': 'Open Clip Tools',
+    onclick: () => {
+      const open = !document.body.classList.contains('sheet-open');
+      document.body.classList.toggle('sheet-open', open);
+      if (open) document.getElementById('inspector')?.focus?.();
+    },
+  });
+  root.append(sheetFab);
 
   refreshMedia();
   applyLayoutToFrame();
@@ -766,95 +867,55 @@ function syncOverlays() {
   }
 }
 
-/** Size 9:16 preview to fill available stage, or lock to zoom (1 = original project px). */
+/** Size 9:16 preview to always fill available stage (fit). */
 function fitPreviewFrame() {
   const stage = document.querySelector('.preview-stage');
   const frame = S.previewFrame || document.querySelector('.preview-frame');
   if (!stage || !frame || !S.timeline) return;
-  const zoom = S.previewZoom;
-  if (zoom === 'fit') {
-    stage.classList.remove('zoomed');
-    frame.classList.remove('manual-size');
-    frame.style.width = '';
-    frame.style.height = '';
-    const cs = getComputedStyle(stage);
-    const availH = stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-    const availW = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-    if (availH < 40 || availW < 40) return;
-    let h = availH;
-    let w = h * (9 / 16);
-    if (w > availW) { w = availW; h = w * (16 / 9); }
-    frame.style.height = `${Math.floor(h)}px`;
-    frame.style.width = `${Math.floor(w)}px`;
-  } else {
-    // number: 1 = original size (1 timeline px → 1 CSS px)
-    const tw = S.timeline.width || 1080;
-    const th = S.timeline.height || 1920;
-    const w = Math.max(40, Math.round(tw * zoom));
-    const h = Math.max(40, Math.round(th * zoom));
-    stage.classList.add('zoomed');
-    frame.classList.add('manual-size');
-    frame.style.width = `${w}px`;
-    frame.style.height = `${h}px`;
-  }
+  stage.classList.remove('zoomed');
+  frame.classList.remove('manual-size');
+  frame.style.width = '';
+  frame.style.height = '';
+  const cs = getComputedStyle(stage);
+  const availH = stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  const availW = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  if (availH < 40 || availW < 40) return;
+  let h = availH;
+  let w = h * (9 / 16);
+  if (w > availW) { w = availW; h = w * (16 / 9); }
+  frame.style.height = `${Math.floor(h)}px`;
+  frame.style.width = `${Math.floor(w)}px`;
   updatePreviewText(true);
   updateSelBox();
 }
 
-function buildZoomBar() {
-  const mk = (label, val, title) => el('button', {
-    type: 'button',
-    text: label,
-    title,
-    'aria-label': title,
-    'aria-pressed': (S.previewZoom === val || (typeof val === 'number' && S.previewZoom === val)) ? 'true' : 'false',
-    class: S.previewZoom === val || (typeof val === 'number' && S.previewZoom === val) ? 'on' : '',
-    onclick: () => setPreviewZoom(val),
-  });
-  return el('div', { class: 'preview-zoom', id: 'previewZoom', title: 'Preview zoom' },
-    el('span', { class: 'z-label', text: 'Zoom' }),
-    mk('Fit', 'fit', 'Fit preview to stage'),
-    mk('50%', 0.5, 'Half of original project size'),
-    mk('75%', 0.75, '75% of original project size'),
-    mk('100%', 1, 'Original size — 1 project pixel = 1 screen pixel'),
-    mk('150%', 1.5, '150% — inspect fine detail'),
-    el('button', {
-      type: 'button',
-      text: '📱 6.3"',
-      title: 'Draggable 6.3" phone preview (live) — shortcut P',
-      'aria-label': 'Toggle phone preview',
-      'aria-pressed': S.phoneOpen ? 'true' : 'false',
-      class: S.phoneOpen ? 'on' : '',
-      onclick: () => setPhoneOpen(!S.phoneOpen),
-    }),
-  );
-}
-
-function rebuildZoomBar() {
-  const host = document.getElementById('previewZoom') || S.zoomHost;
-  if (!host) return;
-  const nb = buildZoomBar();
-  host.replaceWith(nb);
-  S.zoomHost = nb;
-}
-
-function setPreviewZoom(val) {
-  S.previewZoom = val;
-  rebuildZoomBar();
-  fitPreviewFrame();
-  const stage = document.querySelector('.preview-stage');
-  const frame = S.previewFrame;
-  if (stage && frame && val !== 'fit') {
-    // Center the huge frame so the canvas (not empty stage) is what you see
-    stage.scrollLeft = Math.max(0, (frame.offsetWidth - stage.clientWidth) / 2);
-    stage.scrollTop = Math.max(0, (frame.offsetHeight - stage.clientHeight) / 2);
-  } else if (stage) {
-    stage.scrollLeft = 0;
-    stage.scrollTop = 0;
+function setPhoneOpen(open, { quiet = false } = {}) {
+  const pe = ensurePhonePreview();
+  S.phoneOpen = !!open;
+  try { localStorage.setItem('rw_phone_preview', S.phoneOpen ? '1' : '0'); } catch { /* */ }
+  pe.shell.classList.toggle('hidden', !S.phoneOpen);
+  if (S.phoneBtn) {
+    S.phoneBtn.setAttribute('aria-pressed', S.phoneOpen ? 'true' : 'false');
+    S.phoneBtn.classList.toggle('on', S.phoneOpen);
   }
-  updateTimeLabel();
-  syncMedia(true);
-  toast(val === 'fit' ? 'Preview: fit (Esc or 0 always returns here)' : `Preview: ${Math.round(val * 100)}% (original = 100%) · Esc/Fit to exit`);
+
+  if (S.phoneOpen) {
+    sizePhonePreview();
+    applyPhonePos();
+    // Layout class mirrors main frame
+    const main = S.previewFrame;
+    pe.screen.classList.remove('layout-none', 'layout-split-h', 'layout-split-v');
+    const mode = main ? ([...main.classList].find((c) => c.startsWith('layout-')) || 'layout-none') : 'layout-none';
+    pe.screen.classList.add(mode);
+    syncPhonePreview(true);
+    renderPhoneText();
+    updateTimeLabel();
+    if (!quiet) toast('6.3" phone live — drag the top bar · P to hide');
+  } else {
+    try { pe.v1.pause(); } catch { /* */ }
+    try { pe.v2.pause(); } catch { /* */ }
+    if (!quiet) toast('Phone preview hidden (P shows it)');
+  }
 }
 
 /* ================= 6.3" phone preview (live, draggable) ================= */
@@ -1016,32 +1077,6 @@ function sizePhonePreview() {
   }
   // Keep on-screen after resize
   if (S.phonePos) setPhonePos(S.phonePos.x, S.phonePos.y, { save: false });
-}
-
-function setPhoneOpen(open, { quiet = false } = {}) {
-  const pe = ensurePhonePreview();
-  S.phoneOpen = !!open;
-  try { localStorage.setItem('rw_phone_preview', S.phoneOpen ? '1' : '0'); } catch { /* */ }
-  pe.shell.classList.toggle('hidden', !S.phoneOpen);
-  rebuildZoomBar();
-
-  if (S.phoneOpen) {
-    sizePhonePreview();
-    applyPhonePos();
-    // Layout class mirrors main frame
-    const main = S.previewFrame;
-    pe.screen.classList.remove('layout-none', 'layout-split-h', 'layout-split-v');
-    const mode = main ? ([...main.classList].find((c) => c.startsWith('layout-')) || 'layout-none') : 'layout-none';
-    pe.screen.classList.add(mode);
-    syncPhonePreview(true);
-    renderPhoneText();
-    updateTimeLabel();
-    if (!quiet) toast('6.3" phone live — drag the top bar · P to hide');
-  } else {
-    try { pe.v1.pause(); } catch { /* */ }
-    try { pe.v2.pause(); } catch { /* */ }
-    if (!quiet) toast('Phone preview hidden (P shows it)');
-  }
 }
 
 function togglePhonePreview() {
@@ -1693,6 +1728,12 @@ function effectToCssFilter(effect) {
     case 'warm': return 'saturate(1.15) contrast(1.05) hue-rotate(-8deg)';
     case 'cool': return 'saturate(1.1) contrast(1.05) hue-rotate(12deg)';
     case 'vivid': return 'contrast(1.18) saturate(1.35)';
+    case 'vintage': return 'contrast(0.92) saturate(0.78) brightness(1.04) sepia(0.12)';
+    case 'teal': return 'contrast(1.08) saturate(1.1) hue-rotate(-12deg)';
+    case 'golden': return 'contrast(1.06) saturate(1.12) sepia(0.18) brightness(1.03)';
+    case 'noir': return 'grayscale(1) contrast(1.28) brightness(0.98)';
+    case 'neon': return 'contrast(1.15) saturate(1.55) hue-rotate(8deg)';
+    case 'luxury': return 'contrast(1.12) saturate(1.05) sepia(0.12) brightness(1.02)';
     default: return '';
   }
 }
@@ -2073,6 +2114,7 @@ function renderClip(track, clip) {
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
       if (moved) {
         const changed = JSON.stringify(S.timeline) !== JSON.stringify(snapshot);
         if (changed) {
@@ -2089,8 +2131,10 @@ function renderClip(track, clip) {
         renderInspector();
       }
     };
+    try { node.setPointerCapture?.(e.pointerId); } catch { /* */ }
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   });
 
   node.addEventListener('dblclick', (e) => {
@@ -2501,6 +2545,99 @@ function quickResetLook() {
   toast('Look reset (fit, zoom, focus, effect)');
 }
 
+/** One-click camera motion via scale/pos keyframes on selected media. */
+function applyMotionPreset(name) {
+  const found = selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
+  if (!found) { toast('Add a video/image clip first', true); return; }
+  const { track, clip } = found;
+  selectOnly(track.id, clip.id);
+  const dur = Math.max(0.2, clip.duration);
+  const end = round3(dur);
+  const mid = round3(dur * 0.5);
+  let keyframes = {};
+  let extra = {};
+  if (name === 'push-in') {
+    keyframes = { scale: [{ t: 0, v: 1 }, { t: end, v: 1.08 }], posX: [{ t: 0, v: 50 }, { t: end, v: 50 }], posY: [{ t: 0, v: 50 }, { t: end, v: 50 }] };
+  } else if (name === 'punch') {
+    keyframes = { scale: [{ t: 0, v: 1.2 }, { t: Math.min(0.35, dur * 0.35), v: 1 }, { t: end, v: 1.04 }] };
+  } else if (name === 'reveal') {
+    keyframes = { scale: [{ t: 0, v: 1.25 }, { t: end, v: 1 }] };
+  } else if (name === 'kenburns') {
+    keyframes = {
+      scale: [{ t: 0, v: 1.08 }, { t: end, v: 1.08 }],
+      posX: [{ t: 0, v: 44 }, { t: end, v: 56 }],
+      posY: [{ t: 0, v: 50 }, { t: mid, v: 48 }, { t: end, v: 50 }],
+    };
+  } else {
+    toast('Unknown motion preset', true);
+    return;
+  }
+  extra.keyframes = { ...(clip.keyframes || {}), ...keyframes };
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, extra));
+  const labels = { 'push-in': 'Slow push-in', punch: 'Punch-in', reveal: 'Zoom-out reveal', kenburns: 'Ken Burns pan' };
+  toast(`Motion: ${labels[name] || name}`);
+}
+
+/** Apply text entrance animation (adds text clip if needed). */
+function quickTextAnim(anim) {
+  const found = ensureTextAtPlayhead();
+  if (!found) { toast('Could not add text clip', true); return; }
+  const { track, clip } = found;
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
+    text: { ...(clip.text || {}), anim, animDur: anim === 'fade' ? 0.3 : 0.35 },
+  }));
+  const labels = { fade: 'Fade', pop: 'Pop', 'slide-up': 'Slide up', 'slide-down': 'Slide down', bounce: 'Bounce', 'zoom-in': 'Zoom in' };
+  toast(`Text animation: ${labels[anim] || anim}`);
+}
+
+/** Make selected media a floating PiP overlay (image→v2, video→v3). */
+function quickPip(corner = 'br') {
+  const found = selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
+  if (!found) { toast('Add a video/image clip first', true); return; }
+  const { track, clip } = found;
+  const ov = corner === 'tl'
+    ? { xPct: 18, yPct: 18, widthPct: 28 }
+    : { xPct: 80, yPct: 80, widthPct: 28 };
+  const isOverlayTrack = track.id === 'v2' || track.id === 'v3';
+  if (isOverlayTrack) {
+    quickCommit(() => setClipProps(S.timeline, track.id, clip.id, { overlay: ov }));
+    toast('PiP corner updated');
+    return;
+  }
+  // Move clip to overlay track as floating PiP
+  const dest = clip.kind === 'image' ? 'v2' : 'v3';
+  try {
+    const snap = cloneTimeline(S.timeline);
+    const props = {
+      kind: clip.kind,
+      assetId: clip.assetId,
+      start: clip.start,
+      duration: clip.duration,
+      srcIn: clip.srcIn,
+      volume: clip.volume ?? 1,
+      muted: clip.muted,
+      speed: clip.speed ?? 1,
+      overlay: ov,
+      effect: clip.effect || 'none',
+      fit: clip.fit || 'cover',
+      scale: clip.scale ?? 1,
+      posX: clip.posX ?? 50,
+      posY: clip.posY ?? 50,
+      transitionIn: clip.transitionIn || 'none',
+      fadeIn: clip.fadeIn || 0,
+      fadeOut: clip.fadeOut || 0,
+      keyframes: clip.keyframes || {},
+    };
+    removeClip(S.timeline, track.id, clip.id);
+    const nc = addClip(S.timeline, dest, props, { autoSlot: true });
+    selectOnly(dest, nc.id);
+    commit(snap);
+    renderTimeline(); renderInspector(); updateFooter(); updatePreviewText(true); syncMedia(true);
+    updatePreviewBadges(); flashPreview(); updateSelBox();
+    toast('PiP — clip is now a corner overlay (drag on canvas)');
+  } catch (e) { toast(e.message, true); }
+}
+
 /* ================= inspector ================= */
 
 function currentKfValue(clip, prop, localT) {
@@ -2533,7 +2670,7 @@ function renderInspector(focusText = false) {
         el('div', { class: 'ie-icon', text: '▣' }),
         el('div', { class: 'ie-title', text: 'Click a clip on the timeline' }),
         el('div', { class: 'ie-sub', text: 'Size, color, speed, fades, and text styles open here for the selected clip.' }),
-        el('div', { class: 'ie-hint', text: 'Quick looks: Top title bar · Black & white · Fit whole frame — use the Style bar under the preview.' })
+        el('div', { class: 'ie-hint', text: 'Quick looks, Motion, and Text FX are under the preview — or open Clip Tools on the right (or bottom sheet on mobile).' })
       )
     );
     return;
@@ -2659,7 +2796,14 @@ function renderInspector(focusText = false) {
     const animSel = el('select', { class: 'input' },
       TEXT_ANIMS.map((a) => el('option', {
         value: a, selected: normalizeTextAnim(t.anim || 'none') === a || undefined,
-      }, a === 'none' ? 'None' : a === 'fade' ? 'Fade in/out' : 'Pop')));
+      }, a === 'none' ? 'None'
+        : a === 'fade' ? 'Fade in/out'
+        : a === 'pop' ? 'Pop'
+        : a === 'slide-up' ? 'Slide up'
+        : a === 'slide-down' ? 'Slide down'
+        : a === 'bounce' ? 'Bounce'
+        : a === 'zoom-in' ? 'Zoom in'
+        : a)));
     const strokeW = el('input', { class: 'input', type: 'number', min: '0', max: '16', step: '1', value: String(Math.round(t.strokeWidth || 0)) });
     const strokeC = el('input', { class: 'input', type: 'color', value: /^#[0-9a-fA-F]{6}$/.test(t.strokeColor || '') ? t.strokeColor : '#000000', style: 'padding:2px;height:32px' });
     const shadowSel = el('select', { class: 'input' },
@@ -2774,7 +2918,15 @@ function renderInspector(focusText = false) {
       EFFECTS.map((ef) => el('option', {
         value: ef,
         selected: normalizeEffect(clip.effect) === ef || undefined,
-      }, ef === 'none' ? 'None (original)' : ef === 'bw' ? 'Black & white' : ef.charAt(0).toUpperCase() + ef.slice(1))));
+      }, ef === 'none' ? 'None (original)'
+        : ef === 'bw' ? 'Black & white'
+        : ef === 'vintage' ? 'Vintage (faded film)'
+        : ef === 'teal' ? 'Teal & orange'
+        : ef === 'golden' ? 'Golden hour'
+        : ef === 'noir' ? 'Noir (high-contrast B&W)'
+        : ef === 'neon' ? 'Neon pop'
+        : ef === 'luxury' ? 'Luxury gold'
+        : ef.charAt(0).toUpperCase() + ef.slice(1))));
     effectSel.addEventListener('change', () => apply(() => setClipProps(S.timeline, track.id, clip.id, { effect: effectSel.value })));
 
     grid.append(
@@ -3368,25 +3520,8 @@ function bindKeys() {
     if (e.key === '4' && S.selection) { e.preventDefault(); setClipSpeed(4 / (Number(getClipSafe()?.speed) || 1)); return; }
     if (e.key === 'p' || e.key === 'P') { e.preventDefault(); togglePhonePreview(); return; }
     if (e.key === 'Escape') {
-      // Always offer a way out of deep zoom first
-      if (S.previewZoom !== 'fit') { e.preventDefault(); setPreviewZoom('fit'); return; }
       if (S.multi && S.multi.length) { S.multi = null; afterSelectionChange(); return; }
       if (S.selection) { clearSelection(); afterSelectionChange(); return; }
-    }
-    if (e.key === '0') { e.preventDefault(); setPreviewZoom('fit'); return; }
-    if (e.key === '+' || e.key === '=') {
-      e.preventDefault();
-      const steps = ['fit', 0.5, 0.75, 1, 1.5];
-      const i = steps.findIndex((s) => s === S.previewZoom);
-      setPreviewZoom(steps[Math.min(steps.length - 1, i + 1)] ?? 1);
-      return;
-    }
-    if (e.key === '-' || e.key === '_') {
-      e.preventDefault();
-      const steps = ['fit', 0.5, 0.75, 1, 1.5];
-      const i = steps.findIndex((s) => s === S.previewZoom);
-      setPreviewZoom(steps[Math.max(0, i - 1)] ?? 'fit');
-      return;
     }
     // Alt+Arrows: nudge selected clip(s) on canvas (Shift = 5%)
     if (e.altKey && e.key.startsWith('Arrow')) {
