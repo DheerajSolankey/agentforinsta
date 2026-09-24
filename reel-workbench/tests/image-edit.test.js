@@ -75,12 +75,31 @@ test('image edit endpoints (replace / thumb / derivedFrom)', { timeout: 60000 },
   });
   assert.equal(badThumb.status, 400);
 
+  // garbage bytes with image extension must be rejected
+  const garbageThumb = await fetch(`${BASE}/api/media/${img.id}/thumb`, {
+    method: 'PUT',
+    body: singleFileForm('file', Buffer.from('totally not a png payload'), 'evil.png', 'image/png'),
+  });
+  assert.equal(garbageThumb.status, 400);
+  const garbageThumbBody = await garbageThumb.json();
+  assert.match(garbageThumbBody.error, /valid image|probe|format/i);
+
   const missing = await fetch(`${BASE}/api/media/media-9999/thumb`, { method: 'PUT', body: singleFileForm('file', PNG_1X1, 'x.png') });
   assert.equal(missing.status, 404);
 
   /* ---- POST /replace: overwrite image pixels ---- */
   const fileBefore = await fetch(`${BASE}/api/media/${img.id}/file`);
   const beforeLen = (await fileBefore.arrayBuffer()).byteLength;
+
+  // garbage .png must NOT replace a good image
+  const garbageRep = await fetch(`${BASE}/api/media/${img.id}/replace`, {
+    method: 'POST',
+    body: singleFileForm('file', Buffer.from('garbage-bytes-not-an-image'), 'evil.png', 'image/png'),
+  });
+  assert.equal(garbageRep.status, 400);
+  const stillOriginal = await fetch(`${BASE}/api/media/${img.id}/file`);
+  assert.equal(stillOriginal.status, 200);
+  assert.equal((await stillOriginal.arrayBuffer()).byteLength, beforeLen, 'original preserved after bad replace');
 
   const repRes = await fetch(`${BASE}/api/media/${img.id}/replace`, {
     method: 'POST',
@@ -91,6 +110,7 @@ test('image edit endpoints (replace / thumb / derivedFrom)', { timeout: 60000 },
   assert.equal(repData.media.id, img.id);
   assert.ok(repData.media.size > 0);
   assert.ok(repData.media.edited_at);
+  assert.equal(repData.media.thumb_edited, false, 'custom cover flag cleared after replace');
 
   const fileAfter = await fetch(`${BASE}/api/media/${img.id}/file`);
   assert.equal(fileAfter.status, 200);

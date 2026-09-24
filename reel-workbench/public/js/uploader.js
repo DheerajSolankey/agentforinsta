@@ -119,11 +119,12 @@ export function showServerOp(title) {
 }
 
 /** POST/PUT a FormData body with live upload progress. Resolves parsed JSON on 2xx. */
-export function xhrWithProgress(url, fd, { title = 'Uploading…', method = 'POST' } = {}) {
+export function xhrWithProgress(url, fd, { title = 'Uploading…', method = 'POST', timeoutMs = 120000 } = {}) {
   resetPanel(title);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open(method, url);
+    if (timeoutMs > 0) xhr.timeout = timeoutMs;
     xhr.upload.onprogress = (e) => {
       if (!state) return;
       const loaded = e.loaded || 0;
@@ -134,6 +135,10 @@ export function xhrWithProgress(url, fd, { title = 'Uploading…', method = 'POS
     xhr.upload.onerror = () => {
       failPanel('Network error during upload');
       reject(new Error('Network error during upload'));
+    };
+    xhr.ontimeout = () => {
+      failPanel('Upload timed out');
+      reject(new Error('Upload timed out'));
     };
     xhr.onload = () => {
       let data = {};

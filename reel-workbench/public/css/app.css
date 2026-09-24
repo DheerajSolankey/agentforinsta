@@ -862,12 +862,22 @@ pre.code {
 
 /* ---------- image / thumbnail editor ---------- */
 .modal-wide { width: min(1020px, 96vw); }
-.modal-editor { overflow: hidden; display: flex; flex-direction: column; }
+.modal-editor {
+  overflow: hidden; display: flex; flex-direction: column;
+  max-height: min(88vh, calc(100vh - 40px));
+}
+.modal-editor .foot {
+  flex: 0 0 auto; margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
 .ie {
   display: grid; grid-template-columns: 1fr 240px; gap: 14px;
-  min-height: 360px; max-height: calc(88vh - 150px);
+  min-height: min(360px, calc(88vh - 180px));
+  max-height: calc(88vh - 160px);
+  overflow: hidden;
 }
-.ie-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
+.ie-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; overflow: hidden; }
 .ie-stage {
   position: relative; flex: 1; min-height: 300px;
   background: repeating-conic-gradient(#1b1d22 0% 25%, #141519 0% 50%) 0 0 / 22px 22px;
@@ -937,10 +947,11 @@ pre.code {
 .ie-range { flex: 1; accent-color: var(--accent); cursor: pointer; min-width: 0; }
 .ie-time { font-size: 11px; color: var(--text3); white-space: nowrap; }
 @media (max-width: 760px) {
-  .ie { grid-template-columns: 1fr; }
+  .ie { grid-template-columns: 1fr; overflow: hidden; }
+  .ie-stage { min-height: 180px; }
   .ie-side {
     border-left: none; border-top: 1px solid var(--line); padding: 10px 0 0;
-    max-height: 34vh;
+    max-height: 34vh; overflow-y: auto;
   }
 }
 

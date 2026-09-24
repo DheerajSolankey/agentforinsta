@@ -135,9 +135,10 @@ async function uploadEditedFile(url, blob, filename, method = 'POST') {
 
 /** Open the image editor for an image asset. Save = overwrite in place; or save a derived copy. */
 export function editAssetImage(a, onDone) {
+  const base = String(a.url || '').split('?')[0];
   openImageEditor({
     title: `Edit image — ${a.filename}`,
-    src: `${a.url}?v=${Date.now()}`,
+    src: `${base}?v=${Date.now()}`,
     defaultFormat: formatForExt(a.ext),
     actions: [
       {
@@ -167,10 +168,12 @@ export function editAssetImage(a, onDone) {
 
 /** Open the editor on a video's thumbnail — scrub to a frame, crop/adjust, save as the cover. */
 export function editAssetThumb(a, onDone) {
+  const base = String(a.url || '').split('?')[0];
+  const thumbBase = a.thumb ? String(a.thumb).split('?')[0] : null;
   openImageEditor({
     title: `Edit thumbnail — ${a.filename}`,
-    videoSrc: `${a.url}?v=${Date.now()}`,
-    fallbackSrc: a.thumb ? `${a.thumb}?v=${Date.now()}` : null,
+    videoSrc: `${base}?v=${Date.now()}`,
+    fallbackSrc: thumbBase ? `${thumbBase}?v=${Date.now()}` : null,
     defaultFormat: 'image/jpeg',
     actions: [
       {
@@ -206,9 +209,9 @@ function mediaActions(a, { onDone, isReference = false }) {
       },
     }),
   ];
-  if (isImage) {
+  if (isImage && a.ext !== '.svg') {
     btns.push(el('button', { class: 'btn sm ghost', text: 'Edit image', onclick: () => editAssetImage(a, onDone) }));
-  } else if (a.hasVideo) {
+  } else if (a.hasVideo && a.kind !== 'image') {
     btns.push(el('button', { class: 'btn sm ghost', text: 'Edit thumbnail', onclick: () => editAssetThumb(a, onDone) }));
   }
   btns.push(

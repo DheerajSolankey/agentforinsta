@@ -366,53 +366,77 @@ router.post('/:id/replace', (req, res) => {
     const finalPath = join(DIRS.media, rel);
     const oldPath = join(DIRS.media, asset.rel_path);
     const oldThumbPath = asset.thumb_rel ? join(DIRS.media, asset.thumb_rel) : null;
+    const s = getSettings();
+
+    // move to temp first, validate, then swap — never destroy the original on bad bytes
+    const tmpPath = `${finalPath}.tmp-upload`;
     try {
-      moveInto(f.path, finalPath);
-      if (oldPath !== finalPath) rmSync(oldPath, { force: true });
+      moveInto(f.path, tmpPath);
     } catch (e) {
       rmSync(f.path, { force: true });
+      rmSync(tmpPath, { force: true });
       return res.status(500).json({ error: e.message });
     }
 
-    const s = getSettings();
     let meta = null;
     let probeError = null;
     try {
-      meta = (await probeMedia(resolveFfprobe(s), finalPath)).meta;
+      meta = (await probeMedia(resolveFfprobe(s), tmpPath)).meta;
     } catch (e) {
       probeError = e.message;
     }
+    // require a successful probe for image replace (garbage with .png name is rejected)
+    if (!meta || (!meta.width && !meta.height)) {
+      rmSync(tmpPath, { force: true });
+      return res.status(400).json({ error: 'Uploaded file is not a valid image', detail: probeError || undefined });
+    }
+
+    try {
+      // same path: overwrite in place after validation
+      if (oldPath !== finalPath) {
+        moveInto(tmpPath, finalPath);
+        rmSync(oldPath, { force: true });
+      } else {
+        moveInto(tmpPath, finalPath);
+      }
+    } catch (e) {
+      rmSync(tmpPath, { force: true });
+      return res.status(500).json({ error: e.message });
+    }
+
     asset.ext = `.${ext}`;
     asset.rel_path = rel;
     try { asset.size = statSync(finalPath).size; } catch { asset.size = 0; }
-    if (meta) {
-      asset.width = meta.width;
-      asset.height = meta.height;
-      asset.fps = meta.fps;
-      asset.duration = meta.duration;
-      asset.videoCodec = meta.videoCodec;
-      asset.audioCodec = meta.audioCodec;
-      asset.hasAudio = meta.hasAudio;
-      asset.hasVideo = meta.hasVideo;
-      asset.meta = meta;
-      asset.kind = 'image';
-      asset.probe_error = null;
-    } else {
-      asset.probe_error = probeError;
-    }
+    asset.width = meta.width;
+    asset.height = meta.height;
+    asset.fps = meta.fps;
+    asset.duration = meta.duration;
+    asset.videoCodec = meta.videoCodec;
+    asset.audioCodec = meta.audioCodec;
+    asset.hasAudio = meta.hasAudio;
+    asset.hasVideo = meta.hasVideo;
+    asset.meta = meta;
+    asset.kind = 'image';
+    asset.probe_error = null;
+    asset.thumb_edited = false;
 
-    asset.thumb_rel = null;
+    // regenerate thumb; keep old thumb on failure (never wipe)
     try {
       await generateThumbnail(resolveFfmpeg(s), finalPath, `${asset.id}.jpg`, 0);
-      asset.thumb_rel = join('thumbs', `${asset.id}.jpg`);
-      if (oldThumbPath && oldThumbPath !== join(DIRS.media, asset.thumb_rel)) rmSync(oldThumbPath, { force: true });
+      const newThumb = join('thumbs', `${asset.id}.jpg`);
+      if (oldThumbPath && oldThumbPath !== join(DIRS.media, newThumb)) rmSync(oldThumbPath, { force: true });
+      asset.thumb_rel = newThumb;
     } catch (e) {
       log({ stage: 'replace', status: 'ERROR', error: e.message, asset: asset.id });
-      if (oldThumbPath) rmSync(oldThumbPath, { force: true }); // stale pixels — drop it
+      // keep previous thumb_rel as-is (stale but visible)
     }
 
-    asset.edited_at = new Date().toISOString();
-    saveMedia(asset);
+    try {
+      asset.edited_at = new Date().toISOString();
+      saveMedia(asset);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
     log({ stage: 'replace', status: 'PASS', asset: asset.id });
     res.json({ media: publicView(asset) });
   });
@@ -423,7 +447,7 @@ router.put('/:id/thumb', (req, res) => {
   assertMediaId(req.params.id);
   const asset = getMedia(req.params.id);
   if (!asset) return res.status(404).json({ error: 'Media not found' });
-  singleUpload(64)(req, res, (err) => {
+  singleUpload(Math.min(64, uploadLimitMb()))(req, res, async (err) => {
     if (err) {
       const error = err.code === 'LIMIT_FILE_SIZE' ? 'Thumbnail exceeds 64 MB limit' : err.message;
       return res.status(400).json({ error });
@@ -439,17 +463,43 @@ router.put('/:id/thumb', (req, res) => {
     const rel = join('thumbs', `${asset.id}.${ext}`);
     const finalPath = join(DIRS.media, rel);
     const oldThumbPath = asset.thumb_rel ? join(DIRS.media, asset.thumb_rel) : null;
+
+    // validate bytes before committing
+    const tmpPath = `${finalPath}.tmp-upload`;
     try {
-      moveInto(f.path, finalPath);
-      if (oldThumbPath && oldThumbPath !== finalPath) rmSync(oldThumbPath, { force: true });
+      moveInto(f.path, tmpPath);
     } catch (e) {
       rmSync(f.path, { force: true });
+      rmSync(tmpPath, { force: true });
+      return res.status(500).json({ error: e.message });
+    }
+    const s = getSettings();
+    let ok = false;
+    try {
+      const meta = (await probeMedia(resolveFfprobe(s), tmpPath)).meta;
+      ok = !!(meta && (meta.width || meta.height));
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      rmSync(tmpPath, { force: true });
+      return res.status(400).json({ error: 'Uploaded file is not a valid image' });
+    }
+    try {
+      moveInto(tmpPath, finalPath);
+      if (oldThumbPath && oldThumbPath !== finalPath) rmSync(oldThumbPath, { force: true });
+    } catch (e) {
+      rmSync(tmpPath, { force: true });
       return res.status(500).json({ error: e.message });
     }
     asset.thumb_rel = rel;
     asset.thumb_edited = true;
-    asset.edited_at = new Date().toISOString();
-    saveMedia(asset);
+    try {
+      asset.edited_at = new Date().toISOString();
+      saveMedia(asset);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
     log({ stage: 'thumb', status: 'PASS', asset: asset.id });
     res.json({ media: publicView(asset) });
   });
@@ -557,7 +607,7 @@ router.post('/:id/cut', async (req, res) => {
   assertMediaId(req.params.id);
   const asset = getMedia(req.params.id);
   if (!asset) return res.status(404).json({ error: 'Media not found' });
-  if (!asset.hasVideo && !asset.hasAudio && asset.kind === 'image') {
+  if (asset.kind === 'image') {
     return res.status(400).json({ error: 'Cannot cut an image' });
   }
   const s = getSettings();
@@ -824,7 +874,7 @@ router.post('/:id/extract-frames', async (req, res) => {
         duration: null,
         width: meta.width, height: meta.height, fps: null,
         videoCodec: null, audioCodec: null,
-        hasAudio: false, hasVideo: true,
+        hasAudio: false, hasVideo: false,
         meta,
         purpose: asset.rights_status === 'REFERENCE_ONLY' ? 'reference' : 'production',
         rights_status: asset.rights_status,

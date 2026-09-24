@@ -105,6 +105,35 @@ function fitAspect(ratio, ow, oh) {
   return { x: (1 - w) / 2, y: (1 - h) / 2, w, h };
 }
 
+/** Resize/center a crop to `ratio` around its current center (keeps user framing). */
+function refitCropAroundCenter(c, ratio, ow, oh) {
+  if (!ratio || !ow || !oh) return c || { x: 0, y: 0, w: 1, h: 1 };
+  const cur = c || { x: 0.5, y: 0.5, w: 0.5, h: 0.5 };
+  // max centered rect with this ratio
+  let w = 1;
+  let h = ow / (ratio * oh);
+  if (h > 1) {
+    h = 1;
+    w = (ratio * oh) / ow;
+  }
+  // scale down so it fits inside remaining space around current center if needed
+  const cx = cur.x + cur.w / 2;
+  const cy = cur.y + cur.h / 2;
+  // start from current size projected onto ratio, prefer larger of the two
+  let sw = Math.max(cur.w, cur.h * ratio * (oh / ow));
+  let sh = sw / (ratio * (oh / ow));
+  if (sw > w) { sw = w; sh = sw / (ratio * (oh / ow)); }
+  if (sh > h) { sh = h; sw = sh * (ratio * (oh / ow)); }
+  sw = Math.min(sw, w);
+  sh = Math.min(sh, h);
+  return {
+    x: clamp(cx - sw / 2, 0, 1 - sw),
+    y: clamp(cy - sh / 2, 0, 1 - sh),
+    w: sw,
+    h: sh,
+  };
+}
+
 /* ---------- main editor ---------- */
 
 export function openImageEditor(opts = {}) {
@@ -127,13 +156,24 @@ export function openImageEditor(opts = {}) {
     aspect: null,
     outW: 0,
     outH: 0,
+    outTouched: false,
     format: EDIT_FORMATS.includes(defaultFormat) ? defaultFormat : 'image/jpeg',
     quality: 0.92,
     srcW: 0,
     srcH: 0,
     ready: false,
     closed: false,
+    dirty: false,
+    videoDead: false,
+    lastSrc: null,
+    saveAbort: null,
   };
+  const canFilter = (() => {
+    try {
+      const c = document.createElement('canvas').getContext('2d');
+      return typeof c.filter === 'string';
+    } catch { return false; }
+  })();
 
   const source = document.createElement('canvas');
   const oriented = document.createElement('canvas');
@@ -150,8 +190,9 @@ export function openImageEditor(opts = {}) {
   stageBox.append(loadingEl, errorEl);
 
   const video = isVideo
-    ? el('video', { src: videoSrc, preload: 'auto', playsinline: true, crossorigin: 'anonymous', style: 'display:none' })
+    ? el('video', { src: videoSrc, preload: 'auto', playsinline: true, crossorigin: 'anonymous', muted: true, style: 'display:none' })
     : null;
+  if (video) video.muted = true;
 
   /* ----- side panel widgets ----- */
   const infoLine = el('div', { class: 'ie-info', text: '—' });
@@ -190,11 +231,16 @@ export function openImageEditor(opts = {}) {
       onclick: () => {
         if (!st.ready) return;
         st.aspect = a.ratio;
-        st.crop = fitAspect(a.ratio, oriented.width, oriented.height);
+        if (a.ratio === null) {
+          // Free: keep current crop, only unlock ratio
+        } else {
+          st.crop = refitCropAroundCenter(st.crop, a.ratio, oriented.width, oriented.height);
+        }
         aspectChips.querySelectorAll('.chip').forEach((c) => c.classList.remove('active'));
         chip.classList.add('active');
+        st.dirty = true;
         syncCropEl();
-        updateOutDims(true);
+        updateOutDims(false);
         renderPreview();
       },
     });
@@ -210,6 +256,7 @@ export function openImageEditor(opts = {}) {
     inp.addEventListener('input', () => {
       st.adj[key] = Number(inp.value);
       val.textContent = `${inp.value}%`;
+      st.dirty = true;
       renderPreview();
     });
     const row = el('label', { class: 'ie-slider' },
@@ -282,9 +329,11 @@ export function openImageEditor(opts = {}) {
     stageInner.style.height = `${dh}px`;
     const ctx = preview.getContext('2d');
     ctx.save();
-    ctx.filter = filterCss(st.adj);
+    if (canFilter) ctx.filter = filterCss(st.adj);
     ctx.drawImage(oriented, 0, 0, dw, dh);
     ctx.restore();
+    // CSS filter when ctx.filter unsupported (preview only; export falls back below)
+    preview.style.filter = canFilter ? '' : filterCss(st.adj);
     syncCropEl();
   }
 
@@ -305,14 +354,20 @@ export function openImageEditor(opts = {}) {
     cropSizeEl.textContent = `${nat.w} × ${nat.h}`;
   }
 
-  function naturalOut() {
+  function cropRectPx() {
     const ow = oriented.width || st.srcW || 1;
     const oh = oriented.height || st.srcH || 1;
-    const c = st.crop || { w: 1, h: 1 };
-    return {
-      w: Math.max(1, Math.round(c.w * ow)),
-      h: Math.max(1, Math.round(c.h * oh)),
-    };
+    const c = st.crop || { x: 0, y: 0, w: 1, h: 1 };
+    const sx = clamp(Math.round(c.x * ow), 0, ow - 1);
+    const sy = clamp(Math.round(c.y * oh), 0, oh - 1);
+    const ex = clamp(Math.round((c.x + c.w) * ow), sx + 1, ow);
+    const ey = clamp(Math.round((c.y + c.h) * oh), sy + 1, oh);
+    return { sx, sy, sw: ex - sx, sh: ey - sy, ow, oh };
+  }
+
+  function naturalOut() {
+    const r = cropRectPx();
+    return { w: r.sw, h: r.sh };
   }
 
   function updateOutDims(reset = false) {
@@ -321,7 +376,20 @@ export function openImageEditor(opts = {}) {
     if (reset || !st.outW || !st.outH) {
       st.outW = nat.w;
       st.outH = nat.h;
+      st.outTouched = false;
+    } else if (st.outTouched && lockChk.checked && nat.w > 0) {
+      // keep lock aspect relative to the new crop
+      const ratio = nat.w / nat.h;
+      if (st.outW / Math.max(1, st.outH) !== ratio) {
+        st.outH = clamp(Math.round(st.outW / ratio), 16, MAX_OUT);
+      }
+    } else if (st.outW > MAX_OUT || st.outH > MAX_OUT || st.outW < 16 || st.outH < 16) {
+      st.outW = nat.w;
+      st.outH = nat.h;
+      st.outTouched = false;
     }
+    st.outW = clamp(Math.round(st.outW) || nat.w, 16, MAX_OUT);
+    st.outH = clamp(Math.round(st.outH) || nat.h, 16, MAX_OUT);
     outWIn.value = String(st.outW);
     outHIn.value = String(st.outH);
     srcInfo.textContent = `${nat.w} × ${nat.h}`;
@@ -331,7 +399,8 @@ export function openImageEditor(opts = {}) {
   function structuralChange() {
     rebuildOriented();
     renderPreview();
-    updateOutDims(true);
+    // never wipe a user-typed export size on crop/rotate unless lock forces recompute
+    updateOutDims(!st.outTouched);
   }
 
   /* ----- crop interaction ----- */
@@ -357,8 +426,10 @@ export function openImageEditor(opts = {}) {
     const dy = e.clientY - drag.py;
     if (drag.mode === 'move') st.crop = moveCrop(dx, dy, drag.base, drag.bw, drag.bh);
     else st.crop = cornerResize(drag.mode, dx, dy, drag.base, drag.bw, drag.bh, st.aspect);
+    st.dirty = true;
     syncCropEl();
-    updateOutDims(true);
+    // don't wipe custom export size on every pixel of drag
+    updateOutDims(false);
   });
   const endDrag = () => { drag = null; };
   cropEl.addEventListener('pointerup', endDrag);
@@ -368,6 +439,7 @@ export function openImageEditor(opts = {}) {
 
   function rotate(dir) {
     if (!st.ready) return;
+    st.dirty = true;
     if (st.aspect) st.crop = fitAspect(st.aspect, ...rotatedDims(dir));
     else if (st.crop) st.crop = rotateCrop(st.crop, dir);
     st.rot = (st.rot + (dir > 0 ? 90 : 270)) % 360;
@@ -381,12 +453,15 @@ export function openImageEditor(opts = {}) {
   }
   function flip(axis) {
     if (!st.ready) return;
+    st.dirty = true;
+    // crop lives in oriented space; at 90°/270° source H/V axes are swapped
+    const swapAxes = st.rot % 180 !== 0;
     if (axis === 'h') {
       st.flipH = !st.flipH;
-      if (st.crop) st.crop = flipCropH(st.crop);
+      if (st.crop) st.crop = swapAxes ? flipCropV(st.crop) : flipCropH(st.crop);
     } else {
       st.flipV = !st.flipV;
-      if (st.crop) st.crop = flipCropV(st.crop);
+      if (st.crop) st.crop = swapAxes ? flipCropH(st.crop) : flipCropV(st.crop);
     }
     structuralChange();
   }
@@ -398,6 +473,8 @@ export function openImageEditor(opts = {}) {
     st.aspect = null;
     st.crop = { x: 0, y: 0, w: 1, h: 1 };
     st.adj = { ...DEFAULT_ADJ };
+    st.outTouched = false;
+    st.dirty = true;
     [bSlider, cSlider, sSlider].forEach((s) => {
       s.inp.value = '100';
       s.val.textContent = '100%';
@@ -412,30 +489,38 @@ export function openImageEditor(opts = {}) {
     const nat = naturalOut();
     const w = clamp(Math.round(Number(outWIn.value) || nat.w), 16, MAX_OUT);
     st.outW = w;
+    st.outTouched = true;
+    st.dirty = true;
     if (lockChk.checked && nat.w > 0) {
       st.outH = clamp(Math.round(w * (nat.h / nat.w)), 16, MAX_OUT);
       outHIn.value = String(st.outH);
     }
+    outWIn.value = String(st.outW);
     infoLine.textContent = `Export ${st.outW} × ${st.outH} px`;
   });
   outHIn.addEventListener('input', () => {
     const nat = naturalOut();
     const h = clamp(Math.round(Number(outHIn.value) || nat.h), 16, MAX_OUT);
     st.outH = h;
+    st.outTouched = true;
+    st.dirty = true;
     if (lockChk.checked && nat.h > 0) {
       st.outW = clamp(Math.round(h * (nat.w / nat.h)), 16, MAX_OUT);
       outWIn.value = String(st.outW);
     }
+    outHIn.value = String(st.outH);
     infoLine.textContent = `Export ${st.outW} × ${st.outH} px`;
   });
 
   fmtSel.addEventListener('change', () => {
     st.format = fmtSel.value;
+    st.dirty = true;
     qualityRow.style.display = st.format === 'image/png' ? 'none' : '';
   });
   qualityIn.addEventListener('input', () => {
     st.quality = Number(qualityIn.value) / 100;
     qualityVal.textContent = `${qualityIn.value}%`;
+    st.dirty = true;
   });
 
   /* ----- sections ----- */
@@ -460,9 +545,10 @@ export function openImageEditor(opts = {}) {
       el('button', {
         class: 'btn sm block', style: 'margin-top:8px', text: 'Reset crop', disabled: true,
         onclick: () => {
+          st.dirty = true;
           st.crop = fitAspect(st.aspect, oriented.width, oriented.height);
           syncCropEl();
-          updateOutDims(true);
+          updateOutDims(!st.outTouched);
           renderPreview();
         },
       })
@@ -473,6 +559,7 @@ export function openImageEditor(opts = {}) {
         class: 'btn sm block', style: 'margin-top:6px', text: 'Reset adjust', disabled: true,
         onclick: () => {
           st.adj = { ...DEFAULT_ADJ };
+          st.dirty = true;
           [bSlider, cSlider, sSlider].forEach((s) => { s.inp.value = '100'; s.val.textContent = '100%'; });
           renderPreview();
         },
@@ -502,25 +589,27 @@ export function openImageEditor(opts = {}) {
   function setFootState(mode) { // 'loading' | 'ready' | 'busy'
     const btns = footBtns();
     btns.forEach((b, i) => {
-      if (mode === 'busy') b.disabled = true;
-      else if (mode === 'loading') b.disabled = i !== 0; // Cancel stays live
+      if (mode === 'busy') b.disabled = i !== 0; // Cancel stays live → abort save
+      else if (mode === 'loading') b.disabled = i !== 0;
       else b.disabled = false;
     });
     const ready = mode === 'ready';
     side.querySelectorAll('.btn').forEach((b) => { b.disabled = !ready; });
-    [bSlider.inp, cSlider.inp, sSlider.inp, scrub, playBtn, outWIn, outHIn]
+    side.querySelectorAll('.chip').forEach((c) => { c.disabled = !ready; });
+    [bSlider.inp, cSlider.inp, sSlider.inp, outWIn, outHIn, fmtSel, qualityIn]
       .forEach((s) => { s.disabled = !ready; });
+    if (videoBar) {
+      const videoOk = ready && !st.videoDead;
+      scrub.disabled = !videoOk;
+      playBtn.disabled = !videoOk;
+      videoBar.style.display = st.videoDead ? 'none' : '';
+    }
+    cropEl.style.pointerEvents = ready ? '' : 'none';
   }
 
   async function exportBlob() {
     if (!st.ready) throw new Error('Image is still loading');
-    const ow = oriented.width;
-    const oh = oriented.height;
-    const c = st.crop;
-    const sx = clamp(Math.round(c.x * ow), 0, ow - 1);
-    const sy = clamp(Math.round(c.y * oh), 0, oh - 1);
-    const sw = clamp(Math.round(c.w * ow), 1, ow - sx);
-    const sh = clamp(Math.round(c.h * oh), 1, oh - sy);
+    const { sx, sy, sw, sh } = cropRectPx();
     const out = document.createElement('canvas');
     out.width = st.outW;
     out.height = st.outH;
@@ -529,9 +618,37 @@ export function openImageEditor(opts = {}) {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, out.width, out.height);
     }
-    ctx.filter = filterCss(st.adj);
-    ctx.drawImage(oriented, sx, sy, sw, sh, 0, 0, out.width, out.height);
-    ctx.filter = 'none';
+    if (canFilter) {
+      ctx.filter = filterCss(st.adj);
+      ctx.drawImage(oriented, sx, sy, sw, sh, 0, 0, out.width, out.height);
+      ctx.filter = 'none';
+    } else {
+      // no ctx.filter — bake adjustments per-pixel when non-default
+      ctx.drawImage(oriented, sx, sy, sw, sh, 0, 0, out.width, out.height);
+      const { b, c, s } = st.adj;
+      if (b !== 100 || c !== 100 || s !== 100) {
+        const img = ctx.getImageData(0, 0, out.width, out.height);
+        const d = img.data;
+        const bm = b / 100;
+        const cm = c / 100;
+        const sm = s / 100;
+        for (let i = 0; i < d.length; i += 4) {
+          let r = d[i]; let g = d[i + 1]; let bl = d[i + 2];
+          r = (r - 128) * cm + 128;
+          g = (g - 128) * cm + 128;
+          bl = (bl - 128) * cm + 128;
+          r *= bm; g *= bm; bl *= bm;
+          const gray = 0.299 * r + 0.587 * g + 0.114 * bl;
+          r = gray + (r - gray) * sm;
+          g = gray + (g - gray) * sm;
+          bl = gray + (bl - gray) * sm;
+          d[i] = clamp(r, 0, 255);
+          d[i + 1] = clamp(g, 0, 255);
+          d[i + 2] = clamp(bl, 0, 255);
+        }
+        ctx.putImageData(img, 0, 0);
+      }
+    }
     return new Promise((resolve, reject) => {
       out.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not encode image'))), st.format, st.quality);
     });
@@ -541,7 +658,13 @@ export function openImageEditor(opts = {}) {
     title,
     body: root,
     actions: [
-      { label: 'Cancel' },
+      {
+        label: 'Cancel',
+        onClick: () => {
+          if (st.dirty && st.ready && !confirm('Discard unsaved edits?')) return false;
+          return undefined;
+        },
+      },
       ...actions.map((a) => ({
         label: a.label,
         class: a.class || '',
@@ -549,7 +672,12 @@ export function openImageEditor(opts = {}) {
           setFootState('busy');
           try {
             const blob = await exportBlob();
-            await a.handler(blob);
+            const result = await a.handler(blob);
+            st.dirty = false;
+            return result;
+          } catch (e) {
+            toast(e?.message || 'Save failed', true);
+            return false; // keep modal open
           } finally {
             if (!st.closed) setFootState('ready');
           }
@@ -563,9 +691,15 @@ export function openImageEditor(opts = {}) {
   /* ----- lifecycle ----- */
 
   const obs = new MutationObserver(() => {
-    if (document.getElementById('modalRoot')?.classList.contains('hidden')) dispose();
+    const modalRoot = document.getElementById('modalRoot');
+    if (!modalRoot || modalRoot.classList.contains('hidden') || !modalRoot.querySelector('.modal')) dispose();
   });
-  obs.observe(document.getElementById('modalRoot'), { attributes: true, attributeFilter: ['class'] });
+  obs.observe(document.getElementById('modalRoot'), {
+    attributes: true,
+    attributeFilter: ['class'],
+    childList: true,
+    subtree: true,
+  });
 
   const onResize = () => renderPreview();
   window.addEventListener('resize', onResize);
@@ -586,7 +720,21 @@ export function openImageEditor(opts = {}) {
   function showError(msg) {
     loadingEl.style.display = 'none';
     errorEl.style.display = 'flex';
-    errorEl.textContent = msg;
+    errorEl.textContent = '';
+    errorEl.append(
+      el('div', { text: msg }),
+      el('button', {
+        class: 'btn sm', type: 'button', style: 'margin-top:10px', text: 'Retry',
+        onclick: () => {
+          errorEl.style.display = 'none';
+          loadingEl.style.display = 'flex';
+          loadingEl.textContent = 'Loading…';
+          setFootState('loading');
+          const url = st.lastSrc;
+          if (url) initFromImage(url);
+        },
+      })
+    );
     setFootState('loading');
   }
 
@@ -600,6 +748,7 @@ export function openImageEditor(opts = {}) {
     rebuildOriented();
     st.crop = fitAspect(st.aspect, oriented.width, oriented.height);
     st.ready = true;
+    st.dirty = false;
     loadingEl.style.display = 'none';
     errorEl.style.display = 'none';
     renderPreview();
@@ -609,6 +758,7 @@ export function openImageEditor(opts = {}) {
   }
 
   async function initFromImage(url) {
+    st.lastSrc = url;
     try {
       const img = new Image();
       img.crossOrigin = 'anonymous';
@@ -643,10 +793,27 @@ export function openImageEditor(opts = {}) {
       if (st.closed) return;
       const dur = video.duration || 0;
       scrub.max = String(dur || 10);
-      const t0 = dur ? Math.min(0.5, dur / 2) : 0;
+      const t0 = dur && Number.isFinite(dur) ? Math.min(0.5, dur / 2) : 0;
       scrub.value = String(t0);
       timeLbl.textContent = `${fmtDuration(t0)} / ${fmtDuration(dur)}`;
-      video.currentTime = t0;
+      // if already has data and t0===0, seeked may never fire — capture directly
+      if (video.readyState >= 2 && t0 === 0) {
+        captureVideoFrame(true);
+      } else {
+        video.currentTime = t0;
+        // safety net if seeked never fires
+        setTimeout(() => {
+          if (!st.closed && !st.ready && video.readyState >= 2) captureVideoFrame(true);
+        }, 1500);
+      }
+    });
+    video.addEventListener('loadeddata', () => {
+      if (st.closed || st.ready) return;
+      if (video.readyState >= 2) {
+        setTimeout(() => {
+          if (!st.closed && !st.ready) captureVideoFrame(true);
+        }, 500);
+      }
     });
     video.addEventListener('seeked', () => {
       if (st.closed) return;
@@ -657,19 +824,22 @@ export function openImageEditor(opts = {}) {
     });
     video.addEventListener('error', () => {
       if (st.closed) return;
+      st.videoDead = true;
+      if (videoBar) videoBar.style.display = 'none';
       if (fallbackSrc) initFromImage(fallbackSrc);
       else showError('Could not decode this video for thumbnail editing');
     });
     scrub.addEventListener('input', () => {
-      if (!video || !st.ready) return;
+      if (!video || !st.ready || st.videoDead) return;
       video.pause();
       playBtn.textContent = '▶ Play';
       cancelAnimationFrame(rafId);
       video.currentTime = Number(scrub.value);
     });
     playBtn.addEventListener('click', () => {
-      if (!video || !st.ready) return;
+      if (!video || !st.ready || st.videoDead) return;
       if (video.paused) {
+        video.muted = true;
         video.play().then(() => {
           playBtn.textContent = '❚❚ Pause';
           const tick = () => {
@@ -692,6 +862,7 @@ export function openImageEditor(opts = {}) {
     });
   }
 
+  if (!isVideo && src) st.lastSrc = src;
   if (isVideo) initVideo();
   else initFromImage(src);
 }
