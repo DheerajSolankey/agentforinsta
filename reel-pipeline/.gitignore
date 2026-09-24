@@ -1,0 +1,6 @@
+node_modules/
+.env
+temp/
+*.log
+config/queue.json.bak
+config/posted-history.json.bak

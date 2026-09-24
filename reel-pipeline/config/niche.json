@@ -1,0 +1,78 @@
+{
+  "niches": ["movies", "motivational", "quotes"],
+  "audience": "india",
+  "languages": ["hi", "en"],
+  "stockKeywords": {
+    "motivational": [
+      "silhouette sunrise mountain",
+      "man running road motivation",
+      "city night lights cinematic",
+      "ocean waves slow motion",
+      "fire sparks dark",
+      "athlete training gym"
+    ],
+    "movies": [
+      "cinematic film grain dark",
+      "neon night street rain",
+      "theater cinema seats",
+      "projector light beam dust",
+      "dramatic portrait shadow"
+    ],
+    "quotes": [
+      "soft bokeh lights background",
+      "ink writing paper closeup",
+      "clouds timelapse sky",
+      "rain on window mood",
+      "candle flame dark"
+    ]
+  },
+  "hashtags": {
+    "primary": [
+      "#motivation",
+      "#motivationalquotes",
+      "#hindimotivation",
+      "#moviequotes",
+      "#bollywood",
+      "#inspiration",
+      "#mindset",
+      "#successmindset",
+      "#reels",
+      "#reelsinstagram"
+    ],
+    "niche": [
+      "#moviequotes",
+      "#bollywoodmovies",
+      "#hindiquotes",
+      "#lifequotes",
+      "#dailymotivation",
+      "#nevergiveup",
+      "#grindmode",
+      "#cinelovers",
+      "#filmquotes",
+      "#attitudestatus"
+    ],
+    "india": [
+      "#india",
+      "#hindiquotes",
+      "#trendingreels",
+      "#viralreels",
+      "#explorepage",
+      "#instaindia",
+      "#hindi"
+    ],
+    "trending": [
+      "#trending",
+      "#viral",
+      "#fyp",
+      "#instagood",
+      "#photooftheday"
+    ]
+  },
+  "cta": [
+    "Follow for daily motivation 💪",
+    "Save this for later 📌",
+    "Tag someone who needs this ⚡",
+    "Comment your favorite line ❤️",
+    "Share with a friend who's grinding 🤝"
+  ]
+}

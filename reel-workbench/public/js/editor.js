@@ -50,6 +50,7 @@ const S = {
   previewBadges: null,
   previewEmpty: null,
   selBox: null,
+  phoneSelBox: null,
   drag: null, // active canvas drag session
   multi: null, // extra multi-select picks [{trackId, clipId}] (primary is S.selection)
   snapGuides: null,
@@ -57,6 +58,7 @@ const S = {
   phoneEls: null,
   phonePos: null, // {x,y} viewport px
   phoneBtn: null,
+  phoneUserScale: 1, // user resize multiplier for 6.3" preview (persisted)
 };
 
 export function editorCleanup() {
@@ -76,6 +78,7 @@ export function editorCleanup() {
   S.phoneEls = null;
   S.phoneOpen = false;
   S.phoneBtn = null;
+  S.phoneSelBox = null;
   document.body.classList.remove('sheet-open');
 }
 
@@ -490,7 +493,7 @@ function buildUi(root) {
   );
 
   const center = el('div', { class: 'preview-center' },
-    el('div', { class: 'region-hint', style: 'margin:8px 12px 0', html: 'This is your <b>Reel</b>. Press <b>Space</b> to play. Drag corners on the canvas to resize.' }),
+    el('div', { class: 'region-hint', style: 'margin:8px 12px 0', html: 'This is your <b>Reel</b>. Press <b>Space</b> to play. Drag corners on the canvas (or the 6.3" phone) to resize.' }),
     el('div', { class: 'preview-stage' }, frame),
     quickStyle,
     transport
@@ -698,6 +701,7 @@ function buildUi(root) {
 
   // Live 6.3" phone overlay — default on unless user turned it off
   ensurePhonePreview();
+  loadPhoneScale();
   setPhoneOpen(localStorage.getItem('rw_phone_preview') !== '0', { quiet: true });
 
   const onResize = () => {
@@ -705,6 +709,8 @@ function buildUi(root) {
     if (S.phoneOpen) {
       sizePhonePreview();
       renderPhoneText();
+      syncOverlays();
+      updateSelBox();
     }
   };
   S.unsubs.push(() => { /* media elements cleanup */ S.audioEls.forEach((a) => { a.pause(); }); S.audioEls.clear(); });
@@ -845,9 +851,8 @@ function overlayClipsAt(t) {
   return out;
 }
 
-/** Sync floating v2/v3 overlay media into .overlay-layer (W1-3 preview parity with renderer). */
-function syncOverlays() {
-  const layer = S.overlayLayer;
+/** Sync floating v2/v3 overlay media into a layer (.overlay-layer or phone). */
+function syncOverlaysInto(layer, play) {
   if (!layer || !S.timeline) return;
   const t = S.playhead;
   const wanted = overlayClipsAt(t);
@@ -900,13 +905,22 @@ function syncOverlays() {
       if (node.playbackRate !== (clip.speed || 1)) {
         try { node.playbackRate = clip.speed || 1; } catch { /* */ }
       }
-      if (S.playing) node.play?.().catch(() => {});
+      if (play) node.play?.().catch(() => {});
       else node.pause?.();
     } else {
       if (node.tagName !== 'IMG') { node.remove(); continue; }
       if (node.dataset.src !== url) { node.src = url; node.dataset.src = url; }
     }
     applyBox(node);
+  }
+}
+
+/** Sync floating v2/v3 overlay media into main frame + phone (W1-3 preview parity). */
+function syncOverlays() {
+  if (!S.timeline) return;
+  syncOverlaysInto(S.overlayLayer, S.playing);
+  if (S.phoneEls?.overlay) {
+    syncOverlaysInto(S.phoneEls.overlay, S.playing && S.phoneOpen);
   }
 }
 
@@ -952,11 +966,15 @@ function setPhoneOpen(open, { quiet = false } = {}) {
     pe.screen.classList.add(mode);
     syncPhonePreview(true);
     renderPhoneText();
+    syncOverlays();
     updateTimeLabel();
-    if (!quiet) toast('6.3" phone live — drag the top bar · P to hide');
+    updateSelBox();
+    if (!quiet) toast('6.3" live — select a clip, drag handles on the phone · corner ◢ resizes phone · P hides');
   } else {
     try { pe.v1.pause(); } catch { /* */ }
     try { pe.v2.pause(); } catch { /* */ }
+    pe.overlay?.querySelectorAll('video').forEach((v) => { try { v.pause(); } catch { /* */ } });
+    updateSelBox();
     if (!quiet) toast('Phone preview hidden (P shows it)');
   }
 }
@@ -981,13 +999,24 @@ function ensurePhonePreview() {
   const i1 = el('img', { class: 'pane-a-media pp-media hidden', alt: '' });
   const v2 = el('video', { playsinline: true, muted: true, class: 'pane-b-media pp-media hidden' });
   const i2 = el('img', { class: 'pane-b-media pp-media hidden', alt: '' });
+  const overlayLayer = el('div', { class: 'overlay-layer pp-overlay' });
   const textLayer = el('div', { class: 'text-layer pp-text' });
   const empty = el('div', { class: 'preview-empty pp-empty', text: 'No video at playhead' });
   empty.classList.add('hidden');
   const time = el('span', { class: 'pp-time', text: '0:00.0' });
+  const phoneGuides = el('div', { class: 'snap-guides hidden' },
+    el('div', { class: 'sg-v' }),
+    el('div', { class: 'sg-h' })
+  );
+  const phoneSelBox = el('div', { class: 'sel-box', id: 'phoneSelBox' },
+    el('div', { class: 'sh-label', text: '' }),
+    ...['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((h) => el('div', { class: `sh ${h}`, dataset: { h } }))
+  );
 
-  const screen = el('div', { class: 'pp-screen' }, v1, i1, v2, i2, textLayer, empty, time);
-  const dragBar = el('div', { class: 'pp-drag', title: 'Drag to move phone preview' },
+  const screen = el('div', { class: 'pp-screen' },
+    v1, i1, v2, i2, overlayLayer, textLayer, empty, phoneGuides, phoneSelBox, time
+  );
+  const dragBar = el('div', { class: 'pp-drag', title: 'Drag to move · corner to resize' },
     el('span', { class: 'pp-grip', text: '⠿' }),
     el('span', { class: 'pp-drag-label', text: '6.3" live · drag' }),
     el('button', {
@@ -995,24 +1024,90 @@ function ensurePhonePreview() {
       onclick: (e) => { e.stopPropagation(); setPhoneOpen(false); },
     })
   );
+  const resize = el('div', {
+    class: 'pp-resize', title: 'Drag to resize phone preview',
+    'aria-label': 'Resize phone preview', role: 'separator',
+  }, el('span', { class: 'pp-resize-grip', text: '◢' }));
   const shell = el('div', { class: 'phone-preview hidden', id: 'phonePreview' },
     dragBar,
     el('div', { class: 'pp-device' },
       el('div', { class: 'pp-island' }),
       el('div', { class: 'pp-notch-slot' }),
       screen,
-      el('div', { class: 'pp-home' })
+      el('div', { class: 'pp-home' }),
+      resize
     ),
     el('div', { class: 'pp-meta', id: 'ppMeta', text: '6.3"' })
   );
 
   (document.getElementById('app') || document.body).append(shell);
 
-  S.phoneEls = { shell, screen, v1, i1, v2, i2, text: textLayer, empty, time, dragBar };
+  S.phoneEls = { shell, screen, v1, i1, v2, i2, overlay: overlayLayer, text: textLayer, empty, time, dragBar, resize, guides: phoneGuides };
+  S.phoneSelBox = phoneSelBox;
   bindPhoneDrag(shell, dragBar);
+  bindPhoneResize(shell, resize);
+  bindSelBox(phoneSelBox, () => S.phoneEls?.screen);
   v1.addEventListener('loadedmetadata', () => syncPhonePreview(true));
   v2.addEventListener('loadedmetadata', () => syncPhonePreview(true));
   return S.phoneEls;
+}
+
+/** Load persisted user scale for the phone preview. */
+function loadPhoneScale() {
+  try {
+    const n = Number(localStorage.getItem('rw_phone_scale'));
+    if (Number.isFinite(n) && n >= 0.4 && n <= 2.5) S.phoneUserScale = n;
+  } catch { /* */ }
+}
+
+function savePhoneScale() {
+  try { localStorage.setItem('rw_phone_scale', String(S.phoneUserScale)); } catch { /* */ }
+}
+
+/** Drag corner grip → scale the 6.3" preview (aspect locked 9:16). */
+function bindPhoneResize(shell, handle) {
+  if (!handle) return;
+  let resizing = false;
+  let pid = null;
+  let startW = 0;
+  let startClientX = 0;
+
+  const onDown = (e) => {
+    if (e.button != null && e.button !== 0) return;
+    resizing = true;
+    pid = e.pointerId;
+    const r = S.phoneEls?.screen?.getBoundingClientRect() || shell.getBoundingClientRect();
+    startW = r.width || 300;
+    startClientX = e.clientX;
+    shell.classList.add('resizing');
+    try { handle.setPointerCapture(e.pointerId); } catch { /* */ }
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const onMove = (e) => {
+    if (!resizing || (pid != null && e.pointerId !== pid)) return;
+    const base = phoneScreenSize();
+    const dx = e.clientX - startClientX;
+    const nextW = Math.max(140, Math.min(Math.round(startW + dx), Math.round(base.w * 2.4)));
+    // Map desired pixel width → userScale relative to natural 6.3" @ 96dpi
+    S.phoneUserScale = Math.max(0.4, Math.min(2.5, nextW / base.w));
+    sizePhonePreview();
+    renderPhoneText();
+    applyPhonePos();
+  };
+  const onUp = () => {
+    if (!resizing) return;
+    resizing = false;
+    pid = null;
+    shell.classList.remove('resizing');
+    savePhoneScale();
+    applyPhonePos();
+  };
+
+  handle.addEventListener('pointerdown', onDown);
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onUp);
 }
 
 function bindPhoneDrag(shell, handle) {
@@ -1022,7 +1117,7 @@ function bindPhoneDrag(shell, handle) {
   let pid = null;
 
   const onDown = (e) => {
-    if (e.target.closest('button, a, input, select, textarea')) return;
+    if (e.target.closest('button, a, input, select, textarea, .pp-resize, .sel-box')) return;
     if (e.button != null && e.button !== 0) return;
     dragging = true;
     pid = e.pointerId;
@@ -1101,25 +1196,38 @@ function sizePhonePreview() {
   const pe = S.phoneEls;
   if (!pe || !S.phoneOpen) return;
   const { w, h } = phoneScreenSize();
-  // Fit device chrome into the viewport (keep ~1:1 when possible)
+  // Fit device chrome into the viewport, then apply the user's resize multiplier
   const chromeX = 36;
   const chromeY = 72;
   const availW = Math.max(180, window.innerWidth - 48);
   const availH = Math.max(220, window.innerHeight - 56);
-  const scale = Math.min(1, (availW - chromeX) / w, (availH - chromeY) / h);
-  const sw = Math.max(120, Math.round(w * scale));
-  const sh = Math.round(sw * (16 / 9));
+  const maxFit = Math.min((availW - chromeX) / w, (availH - chromeY) / h);
+  const user = Math.max(0.4, Math.min(2.5, S.phoneUserScale || 1));
+  // Allow growth up to viewport; never exceed available space
+  const scale = Math.min(Math.max(user, 0.4), Math.max(0.4, maxFit));
+  let sw = Math.max(140, Math.round(w * scale));
+  let sh = Math.round(sw * (16 / 9));
+  if (sh > availH - chromeY) {
+    const k = (availH - chromeY) / sh;
+    sw = Math.max(140, Math.round(sw * k));
+    sh = Math.round(sw * (16 / 9));
+  }
+  if (sw > availW - chromeX) {
+    const k = (availW - chromeX) / sw;
+    sw = Math.max(140, Math.round(sw * k));
+    sh = Math.round(sw * (16 / 9));
+  }
   pe.screen.style.width = `${sw}px`;
   pe.screen.style.height = `${sh}px`;
   const meta = document.getElementById('ppMeta');
   if (meta) {
-    const pct = Math.round(scale * 100);
-    meta.textContent = pct >= 99
-      ? `6.3" phone · actual size`
-      : `6.3" phone · ${pct}%`;
+    const pct = Math.round((sw / w) * 100);
+    const sizeIn = (PHONE_DIAG_IN * (sw / w)).toFixed(1);
+    meta.textContent = `6.3" base · ${sizeIn}" @ ${pct}%`;
   }
   // Keep on-screen after resize
   if (S.phonePos) setPhonePos(S.phonePos.x, S.phonePos.y, { save: false });
+  updateSelBox();
 }
 
 function togglePhonePreview() {
@@ -1184,6 +1292,7 @@ function renderPhoneText() {
   const pw = pe.screen.clientWidth || 297;
   const ph = pe.screen.clientHeight || Math.round(pw * 16 / 9);
   renderTextLayer(pe.text, pw, ph);
+  updateSelBox();
 }
 
 /** Auto-select first timeline clip so Clip Tools are never empty on open. */
@@ -1276,15 +1385,13 @@ function getSelClip() {
   } catch { return null; }
 }
 
-/** Geometry of one clip (by pick) in frame-local %. */
-function clipGeometry(pick) {
-  if (!pick || !S.timeline) return null;
+/** Geometry of one clip (by pick) in frame-local %. `frame` is the container to measure against. */
+function clipGeometry(pick, frame = S.previewFrame) {
+  if (!pick || !S.timeline || !frame) return null;
   let found;
   try { found = getClip(S.timeline, pick.trackId, pick.clipId); } catch { return null; }
   if (!found) return null;
   const { track, clip } = found;
-  const frame = S.previewFrame;
-  if (!frame) return null;
   const atPlay = S.playhead >= clip.start - 1e-6 && S.playhead < clipEnd(clip) - 1e-6;
 
   if (clip.kind === 'text') {
@@ -1294,14 +1401,16 @@ function clipGeometry(pick) {
     if (node) {
       const fr = frame.getBoundingClientRect();
       const nr = node.getBoundingClientRect();
-      return {
-        kind: 'text', track, clip, pick, atPlay,
-        x: ((nr.left - fr.left) / fr.width) * 100,
-        y: ((nr.top - fr.top) / fr.height) * 100,
-        w: (nr.width / fr.width) * 100,
-        h: (nr.height / fr.height) * 100,
-        label: 'Text / banner',
-      };
+      if (fr.width > 0 && fr.height > 0) {
+        return {
+          kind: 'text', track, clip, pick, atPlay,
+          x: ((nr.left - fr.left) / fr.width) * 100,
+          y: ((nr.top - fr.top) / fr.height) * 100,
+          w: (nr.width / fr.width) * 100,
+          h: (nr.height / fr.height) * 100,
+          label: 'Text / banner',
+        };
+      }
     }
     const presets = { top: { x: 50, y: 14 }, center: { x: 50, y: 50 }, bottom: { x: 50, y: 80 } };
     const p = presets[s.position] || presets.center;
@@ -1358,12 +1467,12 @@ function clipGeometry(pick) {
 }
 
 /** Geometry of selection (union when multi) in frame-local %. */
-function selBoxGeometry() {
+function selBoxGeometry(frame = S.previewFrame) {
   const picks = selectedPicks();
   if (!picks.length) return null;
   const live = [];
   for (const p of picks) {
-    const g = clipGeometry(p);
+    const g = clipGeometry(p, frame);
     if (g && g.atPlay) live.push(g);
   }
   if (!live.length) return null;
@@ -1386,60 +1495,86 @@ function selBoxGeometry() {
   };
 }
 
+function snapGuideRoots() {
+  const roots = [];
+  const main = S.snapGuides || document.getElementById('snapGuides');
+  if (main) roots.push(main);
+  if (S.phoneOpen && S.phoneEls?.guides) roots.push(S.phoneEls.guides);
+  return roots;
+}
+
 function updateSelBox() {
-  const box = S.selBox || document.getElementById('selBox');
-  if (!box || !S.timeline) return;
-  const g = selBoxGeometry();
-  if (!g || !g.atPlay) {
-    box.classList.remove('on');
-    box.style.display = 'none';
-    hideSnapGuides();
-    return;
+  const boxes = [];
+  const mainBox = S.selBox || document.getElementById('selBox');
+  if (mainBox) boxes.push([mainBox, S.previewFrame]);
+  const phoneBox = S.phoneSelBox || document.getElementById('phoneSelBox');
+  if (phoneBox) {
+    if (S.phoneOpen && S.phoneEls?.screen) boxes.push([phoneBox, S.phoneEls.screen]);
+    else {
+      phoneBox.classList.remove('on');
+      phoneBox.style.display = 'none';
+    }
   }
-  box.style.display = '';
-  box.classList.add('on');
-  box.classList.toggle('multi', !!g.multi);
-  box.style.left = `${g.x}%`;
-  box.style.top = `${g.y}%`;
-  box.style.width = `${g.w}%`;
-  box.style.height = `${g.h}%`;
-  const lab = box.querySelector('.sh-label');
-  if (lab && !S.drag) lab.textContent = g.label;
-  // Multi / full-frame media: hide edge handles that don't apply
-  const full = g.kind === 'media' && g.full;
-  const multi = !!g.multi;
-  box.querySelectorAll('.sh').forEach((h) => {
-    const k = h.dataset.h;
-    if (multi || (full && (k === 'n' || k === 's'))) h.style.display = 'none';
-    else h.style.display = '';
-  });
+  if (!boxes.length) return;
+
+  let anyGeom = false;
+  for (const [box, frame] of boxes) {
+    if (!box || !frame || !S.timeline) continue;
+    const g = selBoxGeometry(frame);
+    if (!g || !g.atPlay) {
+      box.classList.remove('on');
+      box.style.display = 'none';
+      continue;
+    }
+    anyGeom = true;
+    box.style.display = '';
+    box.classList.add('on');
+    box.classList.toggle('multi', !!g.multi);
+    box.style.left = `${g.x}%`;
+    box.style.top = `${g.y}%`;
+    box.style.width = `${g.w}%`;
+    box.style.height = `${g.h}%`;
+    const lab = box.querySelector('.sh-label');
+    if (lab && !S.drag) lab.textContent = g.label;
+    // Multi / full-frame media: hide edge handles that don't apply
+    const full = g.kind === 'media' && g.full;
+    const multi = !!g.multi;
+    box.querySelectorAll('.sh').forEach((h) => {
+      const k = h.dataset.h;
+      if (multi || (full && (k === 'n' || k === 's'))) h.style.display = 'none';
+      else h.style.display = '';
+    });
+  }
+  if (!anyGeom) hideSnapGuides();
 }
 
 /** Show/hide center snap guides (axis: 'x' | 'y' | null). */
 function showSnapGuide(axis, pct) {
-  const root = S.snapGuides || document.getElementById('snapGuides');
-  if (!root) return;
-  root.classList.remove('hidden');
-  const v = root.querySelector('.sg-v');
-  const h = root.querySelector('.sg-h');
-  if (v) {
-    v.style.display = axis === 'x' ? '' : 'none';
-    if (axis === 'x') v.style.left = `${pct}%`;
-  }
-  if (h) {
-    h.style.display = axis === 'y' ? '' : 'none';
-    if (axis === 'y') h.style.top = `${pct}%`;
+  const roots = snapGuideRoots();
+  if (!roots.length) return;
+  for (const root of roots) {
+    root.classList.remove('hidden');
+    const v = root.querySelector('.sg-v');
+    const h = root.querySelector('.sg-h');
+    if (v) {
+      v.style.display = axis === 'x' ? '' : 'none';
+      if (axis === 'x') v.style.left = `${pct}%`;
+    }
+    if (h) {
+      h.style.display = axis === 'y' ? '' : 'none';
+      if (axis === 'y') h.style.top = `${pct}%`;
+    }
   }
 }
 
 function hideSnapGuides() {
-  const root = S.snapGuides || document.getElementById('snapGuides');
-  if (!root) return;
-  root.classList.add('hidden');
-  const v = root.querySelector('.sg-v');
-  const h = root.querySelector('.sg-h');
-  if (v) v.style.display = 'none';
-  if (h) h.style.display = 'none';
+  for (const root of snapGuideRoots()) {
+    root.classList.add('hidden');
+    const v = root.querySelector('.sg-v');
+    const h = root.querySelector('.sg-h');
+    if (v) v.style.display = 'none';
+    if (h) h.style.display = 'none';
+  }
 }
 
 /** Snap x/y while dragging (Alt disables). Returns {x,y,gx,gy}. */
@@ -1452,8 +1587,7 @@ function snapMove(x, y, ev) {
   else hideSnapGuides();
   if (sx.snapped != null && sy.snapped != null) {
     // both — show both by stacking: prefer horizontal center when both
-    const root = S.snapGuides;
-    if (root) {
+    for (const root of snapGuideRoots()) {
       root.classList.remove('hidden');
       const v = root.querySelector('.sg-v');
       const h = root.querySelector('.sg-h');
@@ -1483,11 +1617,13 @@ function dragLabelText(d, mut) {
   return null;
 }
 
-/** Bind pointer drag on selection box (move body / resize via handles). Touch-friendly. */
-function bindSelBox(box) {
+/** Bind pointer drag on selection box (move body / resize via handles). Touch-friendly.
+ *  `getFrame` returns the container to measure against (main preview or phone screen). */
+function bindSelBox(box, getFrame = () => S.previewFrame) {
   box.style.touchAction = 'none';
   const onDown = (e) => {
-    const g = selBoxGeometry();
+    const frame = getFrame();
+    const g = selBoxGeometry(frame);
     if (!g || !g.atPlay) return;
     e.preventDefault();
     e.stopPropagation();
@@ -1496,7 +1632,6 @@ function bindSelBox(box) {
       toast('Multi-select: drag body to move · resize one clip at a time', true);
       return;
     }
-    const frame = S.previewFrame;
     const fr = frame.getBoundingClientRect();
     const snap = cloneTimeline(S.timeline);
     const start = {
@@ -3154,6 +3289,9 @@ function togglePlay() {
 function startPlayback() {
   const dur = timelineDuration(S.timeline);
   if (S.playhead >= dur - 0.01) S.playhead = 0;
+  // Cancel any stray loop so we never run two RAF chains
+  if (S.raf) cancelAnimationFrame(S.raf);
+  S.raf = null;
   S.playing = true;
   S.lastTick = performance.now();
   const btnEl = document.querySelector('.preview-transport .btn.primary');
@@ -3188,8 +3326,16 @@ function stopPlayback() {
   S.raf = null;
   const btnEl = document.querySelector('.preview-transport .btn.primary');
   if (btnEl) btnEl.textContent = '▶';
+  // Pause every media surface (main, split, phone, overlays, track audio)
   S.videoEl?.pause?.();
+  S.videoEl2?.pause?.();
   S.audioEls.forEach((a) => a.pause());
+  const pe = S.phoneEls;
+  if (pe) {
+    try { pe.v1.pause(); } catch { /* */ }
+    try { pe.v2.pause(); } catch { /* */ }
+  }
+  S.overlayLayer?.querySelectorAll('video').forEach((v) => { try { v.pause(); } catch { /* */ } });
 }
 
 function programAt(t) {
@@ -3597,7 +3743,16 @@ function bindKeys() {
       e.preventDefault(); doRedo(); return;
     }
     if (typing) return;
-    if (e.code === 'Space') { e.preventDefault(); togglePlay(); return; }
+    if (e.code === 'Space') {
+      e.preventDefault();
+      // Avoid double-toggle: focused button also fires click on Space keyup
+      const ae = document.activeElement;
+      if (ae && ae.tagName === 'BUTTON' && !ae.closest('.palette, .modal-root')) {
+        ae.blur();
+      }
+      togglePlay();
+      return;
+    }
     if (e.key === 's' || e.key === 'S') { e.preventDefault(); doSplit(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); doDelete(); return; }
     if (e.key === 'm' || e.key === 'M') { e.preventDefault(); addMarkerAtPlayhead(); return; }

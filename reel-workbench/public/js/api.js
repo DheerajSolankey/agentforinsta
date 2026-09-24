@@ -339,9 +339,9 @@ export function openHelp() {
     ['Shift+click clip', 'Multi-select on timeline'],
     ['Alt+←→↑↓', 'Nudge selection on canvas (Shift = 5%)'],
     ['Alt while drag', 'Disable snap guides'],
-    ['P', 'Toggle 6.3" phone preview (drag to move)'],
+    ['P', 'Toggle 6.3" phone preview (drag bar to move · corner to resize phone)'],
     ['Esc', 'Clear multi-select / selection'],
-    ['Drag on preview', 'Move · corners resize · snap to center'],
+    ['Drag on preview / phone', 'Move · corners resize · snap to center'],
   ];
   const glossary = [
     ['Projects', 'Your Reels. Create one, then open it in the Editor.'],

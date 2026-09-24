@@ -1,0 +1,27 @@
+{
+  "name": "reel-pipeline",
+  "version": "1.0.0",
+  "description": "Discover → stock → queue → publish pipeline for Indian movies/motivational/quotes Reels",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check-auth": "node src/index.js check-auth",
+    "discover": "node src/index.js discover",
+    "import-stock": "node src/index.js import-stock",
+    "stock": "node src/index.js stock",
+    "queue": "node src/index.js queue",
+    "ready": "node src/index.js queue ready",
+    "post": "node src/index.js post",
+    "scheduler": "node src/index.js start",
+    "status": "node src/index.js status"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

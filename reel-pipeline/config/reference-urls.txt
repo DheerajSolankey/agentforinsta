@@ -1,0 +1,7 @@
+# Curated Instagram Reel URLs for style research (one per line)
+# Used by: node src/index.js discover
+# Videos downloaded manually via igexport go to references/inbox/ then import
+# into reel-workbench as REFERENCE_ONLY (never rendered).
+
+# Example:
+# https://www.instagram.com/reel/EXAMPLE/
