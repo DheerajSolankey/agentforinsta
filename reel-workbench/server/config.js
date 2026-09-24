@@ -150,7 +150,7 @@ export const DEFAULT_SETTINGS = {
     audioCodec: 'aac',
   },
   renderConcurrency: 1,
-  maxUploadMb: 2048,
+  maxUploadMb: 51200,
   jobTimeoutMs: 30 * 60 * 1000,
 };
 

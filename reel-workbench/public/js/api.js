@@ -24,9 +24,14 @@ export async function api(path, opts = {}) {
 export function fmtDuration(sec) {
   if (sec == null || !Number.isFinite(Number(sec))) return '—';
   const s = Number(sec);
-  const m = Math.floor(s / 60);
-  const r = s - m * 60;
-  return m > 0 ? `${m}:${String(Math.floor(r)).padStart(2, '0')}` : `${r.toFixed(1)}s`;
+  const neg = s < 0 ? '-' : '';
+  const a = Math.abs(s);
+  const h = Math.floor(a / 3600);
+  const m = Math.floor((a % 3600) / 60);
+  const r = a % 60;
+  if (h > 0) return `${neg}${h}:${String(m).padStart(2, '0')}:${String(Math.floor(r)).padStart(2, '0')}`;
+  if (m > 0) return `${neg}${m}:${String(Math.floor(r)).padStart(2, '0')}`;
+  return `${neg}${r.toFixed(1)}s`;
 }
 
 export function fmtBytes(n) {

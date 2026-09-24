@@ -9,7 +9,7 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "fixtures": "node scripts/make-fixtures.js",
-    "test": "node --test tests/timeline.test.js tests/security.test.js tests/renderer.test.js tests/captions.test.js tests/integration.test.js",
+    "test": "node --test --test-concurrency=1 tests/timeline.test.js tests/security.test.js tests/renderer.test.js tests/captions.test.js tests/integration.test.js tests/image-edit.test.js tests/cut-convert.test.js",
     "smoke": "node scripts/smoke-render.js"
   },
   "engines": {

@@ -1,16 +1,16 @@
 import { api, el, toast, modal, fmtDuration, fmtBytes, fmtDate, confirmModal, catIcon, catLabel, copyText } from './api.js';
+import { openImageEditor, formatForExt, extForFormat } from './image-editor.js';
+import { xhrWithProgress, showServerOp } from './uploader.js';
 
 const CATEGORIES = ['video', 'image', 'music', 'voice', 'sfx', 'audio', 'font', 'other'];
 
-async function uploadFiles(files, { asReference = false, category = null } = {}) {
+export async function uploadFiles(files, { asReference = false, category = null } = {}) {
   const fd = new FormData();
   for (const f of files) fd.append('files', f);
   if (asReference) fd.append('asReference', 'true');
   if (category) fd.append('category', category);
-  const res = await fetch('/api/media', { method: 'POST', body: fd });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Upload failed');
-  return data;
+  const label = files.length === 1 ? files[0].name : `${files.length} files`;
+  return xhrWithProgress('/api/media', fd, { title: `Importing ${label}` });
 }
 
 function importDropzone(opts) {
@@ -127,7 +127,67 @@ function editMediaModal(a, onDone) {
   });
 }
 
+async function uploadEditedFile(url, blob, filename, method = 'POST') {
+  const fd = new FormData();
+  fd.append('file', blob, filename);
+  return xhrWithProgress(url, fd, { title: `Saving ${filename}`, method });
+}
+
+/** Open the image editor for an image asset. Save = overwrite in place; or save a derived copy. */
+export function editAssetImage(a, onDone) {
+  openImageEditor({
+    title: `Edit image — ${a.filename}`,
+    src: `${a.url}?v=${Date.now()}`,
+    defaultFormat: formatForExt(a.ext),
+    actions: [
+      {
+        label: 'Save changes', class: 'primary',
+        handler: async (blob) => {
+          const fx = extForFormat(blob.type);
+          await uploadEditedFile(`/api/media/${a.id}/replace`, blob, `edited.${fx}`, 'POST');
+          toast('Image updated');
+          onDone?.();
+        },
+      },
+      {
+        label: 'Save as new copy',
+        handler: async (blob) => {
+          const fx = extForFormat(blob.type);
+          const fd = new FormData();
+          fd.append('files', blob, `${a.filename}-edited.${fx}`);
+          fd.append('derivedFrom', a.id);
+          await xhrWithProgress('/api/media', fd, { title: `Saving ${a.filename}-edited.${fx}` });
+          toast('Saved as new copy');
+          onDone?.();
+        },
+      },
+    ],
+  });
+}
+
+/** Open the editor on a video's thumbnail — scrub to a frame, crop/adjust, save as the cover. */
+export function editAssetThumb(a, onDone) {
+  openImageEditor({
+    title: `Edit thumbnail — ${a.filename}`,
+    videoSrc: `${a.url}?v=${Date.now()}`,
+    fallbackSrc: a.thumb ? `${a.thumb}?v=${Date.now()}` : null,
+    defaultFormat: 'image/jpeg',
+    actions: [
+      {
+        label: 'Save thumbnail', class: 'primary',
+        handler: async (blob) => {
+          const fx = extForFormat(blob.type);
+          await uploadEditedFile(`/api/media/${a.id}/thumb`, blob, `thumb.${fx}`, 'PUT');
+          toast('Thumbnail updated');
+          onDone?.();
+        },
+      },
+    ],
+  });
+}
+
 function mediaActions(a, { onDone, isReference = false }) {
+  const isImage = a.kind === 'image' || a.category === 'image';
   const btns = [
     el('button', {
       class: 'btn sm ghost', text: 'Preview',
@@ -145,14 +205,25 @@ function mediaActions(a, { onDone, isReference = false }) {
         modal({ title: a.filename, body, actions: [{ label: 'Close' }] });
       },
     }),
+  ];
+  if (isImage) {
+    btns.push(el('button', { class: 'btn sm ghost', text: 'Edit image', onclick: () => editAssetImage(a, onDone) }));
+  } else if (a.hasVideo) {
+    btns.push(el('button', { class: 'btn sm ghost', text: 'Edit thumbnail', onclick: () => editAssetThumb(a, onDone) }));
+  }
+  btns.push(
     el('button', { class: 'btn sm ghost', text: 'Rename', onclick: () => editMediaModal(a, onDone) }),
     el('button', {
       class: 'btn sm ghost', text: 'Copy path',
       onclick: async () => { await copyText(a.abs_path); toast('Path copied'); },
     }),
-  ];
+  );
   if (!isReference && (a.hasVideo || a.hasAudio)) {
     btns.push(
+      el('button', {
+        class: 'btn sm ghost', text: 'Cut segment',
+        onclick: () => cutSegmentModal(a, onDone),
+      }),
       el('button', {
         class: 'btn sm ghost', text: 'Extract audio',
         onclick: async () => {
@@ -162,6 +233,14 @@ function mediaActions(a, { onDone, isReference = false }) {
             onDone?.();
           } catch (e) { toast(e.message, true); }
         },
+      })
+    );
+  }
+  if (!isReference && (a.hasVideo || (a.kind === 'image' && a.width))) {
+    btns.push(
+      el('button', {
+        class: 'btn sm ghost', text: 'Convert size',
+        onclick: () => convertSizeModal(a, onDone),
       })
     );
   }
@@ -219,6 +298,507 @@ function mediaActions(a, { onDone, isReference = false }) {
     })
   );
   return btns;
+}
+
+/** Parse "90" | "1:30" | "01:02:03.5" → seconds (client-side mirror of server). */
+function parseTimecode(s) {
+  const t = String(s ?? '').trim();
+  if (!/^\d{1,3}(:\d{1,2}){0,2}(\.\d{1,3})?$/.test(t)) return null;
+  const parts = t.split(':').map(Number);
+  if (parts.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  let sec = 0;
+  for (const p of parts) sec = sec * 60 + p;
+  return sec;
+}
+
+function formatTimecode(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return '0:00';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const ss = s.toFixed(s % 1 === 0 ? 0 : 3).padStart(h > 0 || s >= 10 ? 2 : 1, '0');
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${ss}`;
+  return `${m}:${ss}`;
+}
+
+function cutSegmentModal(asset, onDone) {
+  const total = asset.duration || 0;
+  const fromIn = el('input', {
+    class: 'input', value: '0:00', 'aria-label': 'Cut from (start time)',
+    placeholder: '0:00 or 00:01:30.5', spellcheck: 'false',
+  });
+  const toIn = el('input', {
+    class: 'input', value: formatTimecode(Math.min(total || 10, 10)) || '0:10',
+    'aria-label': 'Cut to (end time)',
+    placeholder: '0:10 or 00:02:00', spellcheck: 'false',
+  });
+  const mode = el('select', { class: 'input', 'aria-label': 'Cut quality' },
+    el('option', { value: 'copy', text: 'Fast (keyframe snap — instant on big files)' }),
+    el('option', { value: 'precise', text: 'Precise (re-encode — slower, frame-accurate)' })
+  );
+  const info = el('p', { class: 'muted', style: 'font-size:11.5px;margin-top:6px' });
+  const err = el('p', { style: 'color:var(--red);font-size:11.5px;min-height:14px;margin-top:4px' });
+
+  const preview = () => {
+    const a = parseTimecode(fromIn.value);
+    const b = parseTimecode(toIn.value);
+    if (a == null || b == null) { info.textContent = total ? `Source length: ${fmtDuration(total)}` : ''; return; }
+    if (b <= a) { info.textContent = 'End must be after start'; return; }
+    const len = b - a;
+    info.textContent = `Segment: ${fmtDuration(len)}  ·  from ${formatTimecode(a)} → ${formatTimecode(b)}`
+      + (total ? `  ·  source ${fmtDuration(total)}` : '');
+  };
+  fromIn.addEventListener('input', preview);
+  toIn.addEventListener('input', preview);
+  preview();
+
+  // small helper: "use current preview position" is not available here — offer set-from/to via preview video
+  const previewVideo = total
+    ? el('video', {
+        src: `${asset.url}?v=${Date.now()}`, controls: true, preload: 'metadata',
+        style: 'width:100%;max-height:28vh;background:#000;border-radius:8px;margin-top:8px',
+      })
+    : null;
+  const setFrom = el('button', {
+    class: 'btn sm', type: 'button', text: 'Set from video time → From',
+    onclick: () => {
+      if (!previewVideo) return;
+      fromIn.value = formatTimecode(previewVideo.currentTime || 0);
+      preview();
+    },
+  });
+  const setTo = el('button', {
+    class: 'btn sm', type: 'button', text: 'Set from video time → To',
+    onclick: () => {
+      if (!previewVideo) return;
+      toIn.value = formatTimecode(previewVideo.currentTime || 0);
+      preview();
+    },
+  });
+
+  const body = el('div', {},
+    el('p', { class: 'muted', style: 'font-size:12px;margin-bottom:10px',
+      text: 'Cut a part of this clip into a new library item. Accepts 90, 1:30, or 01:02:03.5.' }),
+    el('div', { class: 'insp-grid', style: 'gap:10px' },
+      el('label', { class: 'field' }, el('span', { text: 'From' }), fromIn),
+      el('label', { class: 'field' }, el('span', { text: 'To' }), toIn),
+      el('label', { class: 'field full' }, el('span', { text: 'Mode' }), mode)
+    ),
+    el('div', { style: 'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap' }, setFrom, setTo),
+    info, err,
+    previewVideo
+  );
+
+  modal({
+    title: `Cut segment — ${asset.filename}`,
+    body,
+    actions: [
+      { label: 'Cancel' },
+      {
+        label: 'Cut', class: 'primary', keepOpen: true,
+        onClick: async (close, ev) => {
+          err.textContent = '';
+          const start = parseTimecode(fromIn.value);
+          const end = parseTimecode(toIn.value);
+          if (start == null) { err.textContent = 'Invalid From time'; return false; }
+          if (end == null) { err.textContent = 'Invalid To time'; return false; }
+          if (end <= start) { err.textContent = 'To must be after From'; return false; }
+          if (total > 0 && start >= total) { err.textContent = `From is past end (${fmtDuration(total)})`; return false; }
+          const btn = ev?.currentTarget;
+          if (btn) btn.disabled = true;
+          const op = showServerOp(`Cutting ${formatTimecode(start)} → ${formatTimecode(end)}…`);
+          try {
+            const r = await api(`/api/media/${asset.id}/cut`, {
+              body: { start: fromIn.value.trim(), end: toIn.value.trim(), mode: mode.value },
+            });
+            op.done(`Cut created — ${fmtDuration(r.media?.duration || 0)}`);
+            toast('Segment cut into a new library item');
+            onDone?.();
+            close();
+          } catch (e) {
+            op.fail(e.message);
+            err.textContent = e.message;
+            if (btn) btn.disabled = false;
+            return false;
+          }
+          return true;
+        },
+      },
+    ],
+  });
+}
+
+function convertSizeModal(asset, onDone) {
+  const srcW0 = asset.width || 1080;
+  const srcH0 = asset.height || 1920;
+  const isVideo = asset.hasVideo && asset.kind !== 'image';
+  const isImage = asset.kind === 'image' || asset.category === 'image';
+
+  const wIn = el('input', { class: 'input', type: 'number', min: '16', max: '7680', step: '2', value: String(srcW0), 'aria-label': 'Width' });
+  const hIn = el('input', { class: 'input', type: 'number', min: '16', max: '7680', step: '2', value: String(srcH0), 'aria-label': 'Height' });
+  const modeSel = el('select', { class: 'input', 'aria-label': 'Fit mode' },
+    el('option', { value: 'stretch', text: 'Stretch (fill exact size)' }),
+    el('option', { value: 'pad', text: 'Pad (keep aspect, letterbox)' }),
+    el('option', { value: 'crop', text: 'Crop (keep aspect, fill + trim)' })
+  );
+  const rotSel = el('select', { class: 'input', 'aria-label': 'Rotate before fit' },
+    el('option', { value: '0', text: 'No rotation' }),
+    el('option', { value: '90', text: 'Rotate 90° clockwise' }),
+    el('option', { value: '180', text: 'Rotate 180°' }),
+    el('option', { value: '270', text: 'Rotate 90° counter-clockwise' })
+  );
+  const info = el('p', { class: 'muted', style: 'font-size:11.5px;margin-top:6px' });
+  const err = el('p', { style: 'color:var(--red);font-size:11.5px;min-height:14px;margin-top:4px' });
+
+  /* ---- live preview: source frame → canvas with rotate + stretch/pad/crop ---- */
+  const outCanvas = el('canvas', {
+    class: 'cv-preview-canvas',
+    'aria-label': 'Conversion preview',
+    style: 'max-width:100%;max-height:220px;background:#000;border:1px solid var(--line);border-radius:8px;display:block',
+  });
+  const outCtx = outCanvas.getContext('2d');
+  const srcLabel = el('span', { class: 'cv-tag', text: `Source ${srcW0}×${srcH0}` });
+  const outLabel = el('span', { class: 'cv-tag', text: `Output ${srcW0}×${srcH0}` });
+  const modeTag = el('span', { class: 'cv-tag', text: 'stretch' });
+
+  let sourceEl = null; // HTMLImageElement | HTMLVideoElement
+  let sourceReady = false;
+  let drawRaf = 0;
+  const rotCanvas = document.createElement('canvas');
+  const rotCtx = rotCanvas.getContext('2d');
+  const frameScrub = el('input', {
+    type: 'range', min: '0', max: '1000', value: '200',
+    'aria-label': 'Preview frame position',
+    style: 'width:100%;margin-top:6px',
+  });
+  const scrubWrap = isVideo
+    ? el('label', { class: 'field', style: 'margin-top:8px' },
+        el('span', { text: 'Preview frame' }),
+        frameScrub,
+        el('div', { class: 'muted', id: 'cv-scrub-lbl', style: 'font-size:11px;margin-top:2px', text: '—' })
+      )
+    : null;
+  const scrubLbl = scrubWrap?.querySelector('#cv-scrub-lbl') || null;
+
+  const rotateDeg = () => Number(rotSel.value) || 0;
+  const srcDims = () => {
+    const r = rotateDeg();
+    return r % 180 === 0 ? { w: srcW0, h: srcH0 } : { w: srcH0, h: srcW0 };
+  };
+
+  function loadSource() {
+    if (isImage || (!isVideo && asset.thumb)) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { sourceEl = img; sourceReady = true; scheduleDraw(); };
+      img.onerror = () => { sourceReady = false; info.textContent = 'Could not load preview image'; };
+      img.src = asset.thumb || asset.url;
+      sourceEl = img;
+      return;
+    }
+    if (isVideo) {
+      const v = document.createElement('video');
+      v.preload = 'metadata'; // large files: only pull headers + first seek range
+      v.muted = true;
+      v.playsInline = true;
+      v.crossOrigin = 'anonymous';
+      v.src = asset.url;
+      const grab = () => {
+        // default preview frame ~20% in (matches scrubber default)
+        const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : (asset.duration || 1);
+        const t = Math.max(0.1, dur * 0.2);
+        const onSeek = () => {
+          v.removeEventListener('seeked', onSeek);
+          sourceEl = v;
+          sourceReady = true;
+          if (scrubLbl) scrubLbl.textContent = `${fmtDuration(v.currentTime || 0)} / ${fmtDuration(dur)}`;
+          scheduleDraw();
+        };
+        v.addEventListener('seeked', onSeek);
+        try { v.currentTime = t; } catch { sourceReady = false; }
+      };
+      if (v.readyState >= 2) grab();
+      else v.addEventListener('loadeddata', grab, { once: true });
+      v.addEventListener('error', () => { sourceReady = false; });
+      sourceEl = v;
+      return;
+    }
+    // fallback: thumb only
+    if (asset.thumb) {
+      const img = new Image();
+      img.onload = () => { sourceEl = img; sourceReady = true; scheduleDraw(); };
+      img.src = asset.thumb;
+      sourceEl = img;
+    }
+  }
+
+  function drawFrame() {
+    drawRaf = 0;
+    const w = Math.round(Number(wIn.value) || 0);
+    const h = Math.round(Number(hIn.value) || 0);
+    const rot = rotateDeg();
+    outLabel.textContent = `Output ${w}×${h}`;
+    modeTag.textContent = rot ? `${modeSel.value} · rot ${rot}°` : modeSel.value;
+    if (!(w >= 16 && h >= 16 && w <= 7680 && h <= 7680)) return;
+    outCanvas.width = w;
+    outCanvas.height = h;
+    outCtx.fillStyle = '#000';
+    outCtx.fillRect(0, 0, w, h);
+    if (!sourceReady || !sourceEl) {
+      outCtx.fillStyle = '#555';
+      outCtx.font = `${Math.max(12, Math.floor(w / 28))}px sans-serif`;
+      outCtx.textAlign = 'center';
+      outCtx.textBaseline = 'middle';
+      outCtx.fillText('Loading preview…', w / 2, h / 2);
+      return;
+    }
+    const natW = sourceEl.videoWidth || sourceEl.naturalWidth || sourceEl.width || srcW0;
+    const natH = sourceEl.videoHeight || sourceEl.naturalHeight || sourceEl.height || srcH0;
+    // 1) render source into rotated buffer (actual pixels, no stretch)
+    const swap = rot % 180 !== 0;
+    rotCanvas.width = swap ? natH : natW;
+    rotCanvas.height = swap ? natW : natH;
+    rotCtx.save();
+    rotCtx.fillStyle = '#000';
+    rotCtx.fillRect(0, 0, rotCanvas.width, rotCanvas.height);
+    rotCtx.translate(rotCanvas.width / 2, rotCanvas.height / 2);
+    rotCtx.rotate((rot * Math.PI) / 180);
+    rotCtx.drawImage(sourceEl, -natW / 2, -natH / 2, natW, natH);
+    rotCtx.restore();
+
+    const sw = rotCanvas.width;
+    const sh = rotCanvas.height;
+    const mode = modeSel.value;
+    if (mode === 'stretch') {
+      outCtx.drawImage(rotCanvas, 0, 0, w, h);
+    } else if (mode === 'pad') {
+      const scale = Math.min(w / sw, h / sh);
+      const dw = sw * scale;
+      const dh = sh * scale;
+      outCtx.drawImage(rotCanvas, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    } else { // crop
+      const scale = Math.max(w / sw, h / sh);
+      const dw = sw * scale;
+      const dh = sh * scale;
+      outCtx.drawImage(rotCanvas, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    }
+    // thin accent frame when pad letterboxes
+    if (mode === 'pad' && Math.abs(sw / sh - w / h) > 0.01) {
+      outCtx.strokeStyle = 'rgba(232,180,74,0.35)';
+      outCtx.lineWidth = Math.max(1, Math.round(w / 400));
+      outCtx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    }
+  }
+
+  function scheduleDraw() {
+    if (drawRaf) return;
+    drawRaf = requestAnimationFrame(drawFrame);
+  }
+
+  function preview() {
+    const w = Math.round(Number(wIn.value) || 0);
+    const h = Math.round(Number(hIn.value) || 0);
+    if (w < 16 || h < 16 || w > 7680 || h > 7680) {
+      info.textContent = 'Size must be 16–7680';
+      err.textContent = '';
+      scheduleDraw();
+      return;
+    }
+    const rot = rotateDeg();
+    const sd = srcDims();
+    const srcAr = (sd.w / sd.h).toFixed(3);
+    const outAr = (w / h).toFixed(3);
+    const same = w === srcW0 && h === srcH0 && rot === 0 && modeSel.value === 'stretch';
+    info.textContent = `${srcW0}×${srcH0}${rot ? ` →rot${rot}→ ${sd.w}×${sd.h}` : ''} → ${w}×${h}  ·  ${modeSel.value}`
+      + `  ·  AR ${srcAr} → ${outAr}`
+      + (same ? '  ·  same size' : '')
+      + (asset.duration ? `  ·  ${fmtDuration(asset.duration)}` : '');
+    scheduleDraw();
+  }
+
+  const PRESETS = [
+    { w: 1080, h: 1920, label: '9:16 · 1080×1920' },
+    { w: 720, h: 1280, label: '9:16 · 720×1280' },
+    { w: 1920, h: 1080, label: '16:9 · 1920×1080' },
+    { w: 1280, h: 720, label: '16:9 · 1280×720' },
+    { w: 1080, h: 1080, label: '1:1 · 1080×1080' },
+    { w: srcW0, h: srcH0, label: `Source · ${srcW0}×${srcH0}` },
+  ];
+  const chips = el('div', { class: 'chips', style: 'margin:8px 0' });
+  const chipEls = [];
+  for (const p of PRESETS) {
+    const chip = el('button', {
+      class: `chip ${p.w === srcW0 && p.h === srcH0 ? 'active' : ''}`, type: 'button', text: p.label,
+      onclick: () => {
+        wIn.value = String(p.w);
+        hIn.value = String(p.h);
+        chipEls.forEach((c) => c.classList.remove('active'));
+        chip.classList.add('active');
+        preview();
+      },
+    });
+    chipEls.push(chip);
+    chips.append(chip);
+  }
+
+  // landscape movie → portrait reel: rotate 90° CW + crop to fill 9:16
+  const reelBtn = el('button', {
+    class: 'btn sm', type: 'button', text: 'Reel 9:16 (rotate + crop)',
+    title: 'Rotate 90° CW then crop to 720×1280 — no stretch',
+    onclick: () => {
+      rotSel.value = '90';
+      wIn.value = '720';
+      hIn.value = '1280';
+      modeSel.value = 'crop';
+      syncChip();
+      preview();
+    },
+  });
+  const reelPadBtn = el('button', {
+    class: 'btn sm', type: 'button', text: 'Reel 9:16 (rotate + pad)',
+    title: 'Rotate 90° CW then letterbox to 720×1280 — full frame kept',
+    onclick: () => {
+      rotSel.value = '90';
+      wIn.value = '720';
+      hIn.value = '1280';
+      modeSel.value = 'pad';
+      syncChip();
+      preview();
+    },
+  });
+
+  const swap = el('button', {
+    class: 'btn sm', type: 'button', text: 'Swap W↔H',
+    onclick: () => {
+      const t = wIn.value; wIn.value = hIn.value; hIn.value = t;
+      chipEls.forEach((c) => c.classList.remove('active'));
+      preview();
+    },
+  });
+  const keepAspect = el('button', {
+    class: 'btn sm', type: 'button', text: 'Match aspect',
+    onclick: () => {
+      const sd = srcDims();
+      const ratio = sd.w / sd.h || 1;
+      hIn.value = String(Math.round(Number(wIn.value) / ratio) || sd.h);
+      chipEls.forEach((c) => c.classList.remove('active'));
+      preview();
+    },
+  });
+
+  // mark active chip when size matches a preset
+  const syncChip = () => {
+    const w = Math.round(Number(wIn.value));
+    const h = Math.round(Number(hIn.value));
+    chipEls.forEach((c, i) => {
+      c.classList.toggle('active', PRESETS[i].w === w && PRESETS[i].h === h);
+    });
+  };
+  const onField = () => { syncChip(); preview(); };
+  wIn.addEventListener('input', onField);
+  hIn.addEventListener('input', onField);
+  modeSel.addEventListener('change', preview);
+  rotSel.addEventListener('change', preview);
+
+  frameScrub.addEventListener('input', () => {
+    if (!sourceEl || !sourceEl.duration || !Number.isFinite(sourceEl.duration)) return;
+    const t = (Number(frameScrub.value) / 1000) * sourceEl.duration;
+    const onSeek = () => {
+      sourceEl.removeEventListener('seeked', onSeek);
+      if (scrubLbl) scrubLbl.textContent = `${fmtDuration(t)} / ${fmtDuration(sourceEl.duration)}`;
+      scheduleDraw();
+    };
+    sourceEl.addEventListener('seeked', onSeek);
+    try { sourceEl.currentTime = t; } catch { /* ignore */ }
+  });
+
+  const previewBox = el('div', { class: 'cv-preview-box' },
+    el('div', { class: 'cv-preview-head' }, srcLabel, el('span', { class: 'cv-arrow', text: '→' }), outLabel, modeTag),
+    outCanvas,
+    scrubWrap
+  );
+
+  loadSource();
+  preview();
+
+  const body = el('div', {},
+    el('p', { class: 'muted', style: 'font-size:12px;margin-bottom:8px',
+      text: 'Live preview updates as you change rotate / size / fit mode. For 1920×1038 movies → 720×1280 reels, use Reel 9:16 (rotate + crop).' }),
+    previewBox,
+    el('div', { class: 'chips', style: 'margin:0 0 8px' }, reelBtn, reelPadBtn),
+    chips,
+    el('div', { class: 'insp-grid', style: 'gap:10px' },
+      el('label', { class: 'field' }, el('span', { text: 'Width' }), wIn),
+      el('label', { class: 'field' }, el('span', { text: 'Height' }), hIn),
+      el('label', { class: 'field full' }, el('span', { text: 'Rotate (before fit)' }), rotSel),
+      el('label', { class: 'field full' }, el('span', { text: 'Fit mode' }), modeSel)
+    ),
+    el('div', { style: 'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap' }, swap, keepAspect),
+    info, err
+  );
+
+  const release = () => {
+    if (drawRaf) cancelAnimationFrame(drawRaf);
+    if (sourceEl && sourceEl.tagName === 'VIDEO') {
+      try { sourceEl.pause(); sourceEl.removeAttribute('src'); sourceEl.load(); } catch { /* ignore */ }
+    }
+    sourceEl = null;
+    sourceReady = false;
+    if (mo) { mo.disconnect(); mo = null; }
+  };
+
+  /* cleanup on any close path (button, Escape, backdrop) */
+  let mo = null;
+  const root = document.getElementById('modalRoot');
+  mo = new MutationObserver(() => {
+    if (!root || !root.classList.contains('hidden') && root.querySelector('.modal')) return;
+    release();
+  });
+  if (root) mo.observe(root, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true });
+
+  modal({
+    title: `Convert size — ${asset.filename}`,
+    body,
+    actions: [
+      { label: 'Cancel', onClick: () => { release(); } },
+      {
+        label: 'Convert', class: 'primary', keepOpen: true,
+        onClick: async (close, ev) => {
+          err.textContent = '';
+          const w = Math.round(Number(wIn.value));
+          const h = Math.round(Number(hIn.value));
+          const rotate = rotateDeg();
+          if (!Number.isFinite(w) || !Number.isFinite(h) || w < 16 || h < 16 || w > 7680 || h > 7680) {
+            err.textContent = 'Width/height must be 16–7680';
+            return false;
+          }
+          if (w === srcW0 && h === srcH0 && modeSel.value === 'stretch' && rotate === 0) {
+            err.textContent = 'Already that size — pick a different size, rotate, or fit mode';
+            return false;
+          }
+          const btn = ev?.currentTarget;
+          if (btn) btn.disabled = true;
+          const op = showServerOp(`Converting to ${w}×${h}${rotate ? ` (rot ${rotate}°)` : ''}…`);
+          try {
+            const r = await api(`/api/media/${asset.id}/convert`, {
+              body: { width: w, height: h, mode: modeSel.value, rotate },
+            });
+            op.done(`Converted — ${r.media?.width}×${r.media?.height}`);
+            toast(`Converted to ${r.media?.width}×${r.media?.height}`);
+            onDone?.();
+            release();
+            close();
+          } catch (e) {
+            op.fail(e.message);
+            err.textContent = e.message;
+            if (btn) btn.disabled = false;
+            return false;
+          }
+          return true;
+        },
+      },
+    ],
+  });
 }
 
 async function analyzeModal(asset, onDone) {

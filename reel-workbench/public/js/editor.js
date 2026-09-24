@@ -2,6 +2,7 @@ import {
   api, el, toast, modal, confirmModal, fmtDuration, fmtDate, copyText, catIcon, catLabel,
 } from './api.js';
 import { navigate, appState } from './app.js';
+import { editAssetImage, uploadFiles } from './media.js';
 import {
   createTimeline, getTrack, getClip, addClip, removeClip, splitClip, trimClip, moveClip,
   duplicateClip, setClipProps, setTrackProps, timelineDuration, cloneTimeline, validateTimeline,
@@ -64,6 +65,7 @@ const S = {
 export function editorCleanup() {
   for (const fn of S.unsubs) { try { fn(); } catch { /* ignore */ } }
   S.unsubs = [];
+  S.refreshMediaList = null;
   stopPlayback();
   clearInterval(S.pollTimer);
   clearInterval(S.renderPoll);
@@ -98,6 +100,24 @@ export function editorOpenLast() {
 }
 
 /* ================= mount ================= */
+
+/** Re-fetch the media library (after import / image edit), busting caches so edits show. */
+async function reloadMediaFromServer() {
+  try {
+    const { media } = await api('/api/media');
+    const v = Date.now();
+    for (const m of media) {
+      if (m.url && (m.kind === 'image' || m.category === 'image')) m.url = `${m.url}?v=${v}`;
+      if (m.thumb) m.thumb = `${m.thumb}?v=${v}`;
+    }
+    S.media = media;
+    S.refreshMediaList?.();
+    renderInspector();
+    syncMedia(true);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 export async function renderEditorView(root, params = []) {
   editorCleanup();
@@ -223,6 +243,7 @@ function buildUi(root) {
       mediaList.append(item);
     }
   };
+  S.refreshMediaList = refreshMedia;
 
   for (const c of [
     { id: 'video', label: 'Videos' }, { id: 'image', label: 'Images' },
@@ -265,13 +286,9 @@ function buildUi(root) {
       input.addEventListener('change', async () => {
         if (!input.files?.length) return;
         try {
-          const fd = new FormData();
-          for (const f of input.files) fd.append('files', f);
-          const res = await fetch('/api/media', { method: 'POST', body: fd });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data.error || 'Upload failed');
+          const data = await uploadFiles([...input.files]);
           toast(`Imported ${data.media?.length || 0} file(s)`);
-          refreshMedia();
+          await reloadMediaFromServer();
         } catch (e) { toast(e.message, true); }
         input.remove();
       });
@@ -2387,7 +2404,10 @@ function dropAsset(assetId, trackId, time) {
     if (fallback === targetTrack) return;
     return dropAsset(assetId, fallback, time);
   }
-  const dur = kind === 'image' ? 4 : Math.max(0.5, Math.min(asset.duration || 4, 15));
+  // Full source length (was hard-capped at 15s — long clips truncated on drop).
+  const dur = kind === 'image'
+    ? 4
+    : Math.max(0.5, asset.duration > 0 ? asset.duration : (asset.duration || 4));
   const snapshot = cloneTimeline(S.timeline);
   try {
     const clip = addClip(S.timeline, targetTrack, {
@@ -3164,6 +3184,20 @@ function renderInspector(focusText = false) {
         el('button', { class: 'btn sm', text: 'No crop (contain)', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { fit: 'contain', scale: 1, posX: 50, posY: 50 })) }),
         el('button', { class: 'btn sm primary', text: 'Make black & white', title: 'Apply black & white color effect', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { effect: 'bw' })) }),
       ),
+      ...(clip.kind === 'image'
+        ? (() => {
+            const asset = S.media.find((m) => m.id === clip.assetId);
+            if (!asset || (asset.kind !== 'image' && asset.category !== 'image')) return [];
+            return [el('div', { class: 'full', style: 'margin-top:6px' },
+              el('button', {
+                class: 'btn sm block',
+                text: 'Edit source image…',
+                title: 'Crop, rotate, adjust and save this image (or a new copy)',
+                onclick: () => editAssetImage(asset, () => { reloadMediaFromServer(); }),
+              })
+            )];
+          })()
+        : []),
     );
   }
 

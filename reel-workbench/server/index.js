@@ -8,6 +8,7 @@ const app = createApp();
 const port = Number(process.env.PORT) || settings.port || 4173;
 
 const server = app.listen(port, '127.0.0.1', () => {
+  server.requestTimeout = 0; // allow multi-GB uploads (Node default is 5 min for the whole request)
   const ffmpegOk = !!detectFfmpeg();
   const fontOk = !!detectFontFile();
   console.log('');
