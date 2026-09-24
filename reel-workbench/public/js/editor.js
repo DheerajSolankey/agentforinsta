@@ -10,8 +10,9 @@ import {
   addMarker, removeMarker, clampSpeed, MIN_SPEED, MAX_SPEED,
   clampZoom, MIN_ZOOM, MAX_ZOOM, FIT_MODES, normalizeTransform,
   EFFECTS, BG_MODES, normalizeEffect, normalizeBgMode, bgToCss,
-  TEXT_ANIMS, TEXT_ALIGNS, TEXT_PRESETS, TEXT_FONTS,
+  TEXT_ANIMS, TEXT_ALIGNS, TEXT_PRESETS, TEXT_FONTS, CAPTION_PRESETS,
   normalizeTextAnim, normalizeTextAlign, estimateBannerLines, bannerBoxHeight,
+  normalizeWatermark, defaultWatermark, WATERMARK_POSITIONS, staggerWordWindows,
   getLayoutMode, setLayoutMode, isSplitLayout, splitPanes, LAYOUT_MODES,
   snapPct, evalKeyframes, fadeGain, transitionGain, TRANSITIONS, KEYFRAME_PROPS,
   clampFade, normalizeTransition,
@@ -180,6 +181,7 @@ function buildUi(root) {
     el('div', { class: 'tb-sep' }),
     btn('Split', 'Cut the selected clip in two at the playhead (S)', doSplit, ''),
     btn('Text', 'Add a title or caption (Text track)', doAddText, ''),
+    btn('Watermark', 'Project brand watermark (burned into export)', openWatermarkModal, ''),
     btn('Duplicate', 'Copy the selected clip', doDuplicate, ''),
     btn('Delete', 'Remove the selected clip (Del)', doDelete, 'danger'),
     el('div', { class: 'tb-sep' }),
@@ -312,6 +314,7 @@ function buildUi(root) {
   video2.addEventListener('loadedmetadata', () => syncMedia(true));
   const img2 = el('img', { class: 'frame-layer pane-b-media hidden', alt: '' });
   const textLayer = el('div', { class: 'text-layer' });
+  const wmLayer = el('div', { class: 'watermark-layer', id: 'watermarkLayer', 'aria-hidden': 'true' });
   const overlayLayer = el('div', { class: 'overlay-layer' });
   const guides = el('div', { class: 'safe-guides' },
     el('div', { class: 'g-top' }), el('div', { class: 'g-bottom' }), el('div', { class: 'g-center' })
@@ -332,7 +335,7 @@ function buildUi(root) {
     el('div', { class: 'sg-v' }),
     el('div', { class: 'sg-h' })
   );
-  const frame = el('div', { class: 'preview-frame' }, video, img, video2, img2, overlayLayer, textLayer, vignette, guides, emptyState, badges, snapGuides, selBox);
+  const frame = el('div', { class: 'preview-frame' }, video, img, video2, img2, overlayLayer, textLayer, wmLayer, vignette, guides, emptyState, badges, snapGuides, selBox);
   S.videoEl = video;
   S.imgEl = img;
   S.videoEl2 = video2;
@@ -495,6 +498,32 @@ function buildUi(root) {
     el('button', {
       class: 'btn sm qs-btn', text: '⚡ Flicker', title: 'Strobe/flicker entrance for titles',
       onclick: () => quickTextAnim('flicker'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '◈ Glitch', title: 'Digital glitch entrance for tech/gaming titles',
+      onclick: () => quickTextAnim('glitch'),
+    }),
+    el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
+    el('span', { class: 'qs-label', text: 'Captions' }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '🎤 Karaoke', title: 'Word-by-word caption on T2 (reels style)',
+      onclick: () => quickCaptionPreset('karaoke'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '🔥 Pop', title: 'Yellow bold pop caption, word stagger',
+      onclick: () => quickCaptionPreset('pop'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '◻ Clean', title: 'Clean bold white caption in safe area',
+      onclick: () => quickCaptionPreset('clean'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: '▢ Boxed', title: 'Dark box caption',
+      onclick: () => quickCaptionPreset('boxed'),
+    }),
+    el('button', {
+      class: 'btn sm qs-btn', text: 'A Outline', title: 'Heavy outline caption',
+      onclick: () => quickCaptionPreset('outline'),
     }),
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Layout' }),
@@ -1018,6 +1047,7 @@ function ensurePhonePreview() {
   const i2 = el('img', { class: 'pane-b-media pp-media hidden', alt: '' });
   const overlayLayer = el('div', { class: 'overlay-layer pp-overlay' });
   const textLayer = el('div', { class: 'text-layer pp-text' });
+  const wmLayer = el('div', { class: 'watermark-layer pp-wm', 'aria-hidden': 'true' });
   const empty = el('div', { class: 'preview-empty pp-empty', text: 'No video at playhead' });
   empty.classList.add('hidden');
   const time = el('span', { class: 'pp-time', text: '0:00.0' });
@@ -1031,7 +1061,7 @@ function ensurePhonePreview() {
   );
 
   const screen = el('div', { class: 'pp-screen' },
-    v1, i1, v2, i2, overlayLayer, textLayer, empty, phoneGuides, phoneSelBox, time
+    v1, i1, v2, i2, overlayLayer, textLayer, wmLayer, empty, phoneGuides, phoneSelBox, time
   );
   const dragBar = el('div', { class: 'pp-drag', title: 'Drag to move · corner to resize' },
     el('span', { class: 'pp-grip', text: '⠿' }),
@@ -1059,7 +1089,7 @@ function ensurePhonePreview() {
 
   (document.getElementById('app') || document.body).append(shell);
 
-  S.phoneEls = { shell, screen, v1, i1, v2, i2, overlay: overlayLayer, text: textLayer, empty, time, dragBar, resize, guides: phoneGuides };
+  S.phoneEls = { shell, screen, v1, i1, v2, i2, overlay: overlayLayer, text: textLayer, wm: wmLayer, empty, time, dragBar, resize, guides: phoneGuides };
   S.phoneSelBox = phoneSelBox;
   bindPhoneDrag(shell, dragBar);
   bindPhoneResize(shell, resize);
@@ -1309,6 +1339,7 @@ function renderPhoneText() {
   const pw = pe.screen.clientWidth || 297;
   const ph = pe.screen.clientHeight || Math.round(pw * 16 / 9);
   renderTextLayer(pe.text, pw, ph);
+  if (pe.wm) renderWatermarkLayer(pe.wm, pw, ph);
   updateSelBox();
 }
 
@@ -2613,6 +2644,84 @@ function doAddText() {
   } catch (e) { toast(e.message, true); }
 }
 
+/** Project watermark dialog — brand mark burned into preview + export. */
+function openWatermarkModal() {
+  const wm = normalizeWatermark(S.timeline?.watermark);
+  const fields = {
+    text: el('input', { class: 'input', type: 'text', value: wm.text, placeholder: 'e.g. FRAMEFLOW or @yourbrand', maxlength: '80' }),
+    position: el('select', { class: 'input' },
+      WATERMARK_POSITIONS.map((p) => el('option', { value: p, selected: wm.position === p || undefined },
+        p === 'vertical-left' ? 'Left edge · vertical ↑' :
+        p === 'vertical-right' ? 'Right edge · vertical ↓' :
+        p === 'top-left' ? 'Top left' : p === 'top-right' ? 'Top right' :
+        p === 'bottom-left' ? 'Bottom left' : p === 'bottom-right' ? 'Bottom right' :
+        p === 'top' ? 'Top center' : p === 'bottom' ? 'Bottom center' : 'Center'))),
+    opacity: el('input', { class: 'input', type: 'number', min: '0.05', max: '1', step: '0.05', value: String(wm.opacity) }),
+    size: el('input', { class: 'input', type: 'number', min: '8', max: '160', value: String(wm.size) }),
+    color: el('input', { class: 'input', type: 'color', value: /^#[0-9a-fA-F]{6}$/.test(wm.color) ? wm.color : '#ffffff', style: 'padding:2px;height:32px' }),
+    font: el('select', { class: 'input' }, TEXT_FONTS.map((f) => el('option', { value: f, selected: (wm.font || 'Arial') === f || undefined }, f))),
+    bold: el('select', { class: 'input' }, [['1', 'Bold'], ['0', 'Regular']].map(([v, lab]) => el('option', { value: v, selected: String(wm.bold ? '1' : '0') === v || undefined }, lab))),
+    uppercase: el('select', { class: 'input' }, [['1', 'UPPERCASE'], ['0', 'As typed']].map(([v, lab]) => el('option', { value: v, selected: String(wm.uppercase ? '1' : '0') === v || undefined }, lab))),
+    letterSpacing: el('input', { class: 'input', type: 'number', min: '0', max: '40', value: String(wm.letterSpacing) }),
+    margin: el('input', { class: 'input', type: 'number', min: '0', max: '300', value: String(wm.margin) }),
+    enabled: el('select', { class: 'input' }, [['1', 'On (shown + exported)'], ['0', 'Off']].map(([v, lab]) => el('option', { value: v, selected: String(wm.enabled ? '1' : '0') === v || undefined }, lab))),
+  };
+
+  const readFields = () => normalizeWatermark({
+    enabled: fields.enabled.value === '1',
+    text: fields.text.value,
+    position: fields.position.value,
+    opacity: Number(fields.opacity.value),
+    size: Number(fields.size.value),
+    color: fields.color.value,
+    font: fields.font.value,
+    bold: fields.bold.value === '1',
+    uppercase: fields.uppercase.value === '1',
+    letterSpacing: Number(fields.letterSpacing.value),
+    margin: Number(fields.margin.value),
+  });
+
+  const applyAndClose = () => {
+    const next = readFields();
+    if (next.enabled && !next.text.trim()) { toast('Watermark needs text when enabled', true); return false; }
+    try {
+      const snap = cloneTimeline(S.timeline);
+      S.timeline.watermark = next;
+      commit(snap);
+      updatePreviewText(true);
+      updateFooter();
+      toast(next.enabled ? `Watermark on — ${next.position}` : 'Watermark off');
+      return true;
+    } catch (e) { toast(e.message, true); return false; }
+  };
+
+  const grid = el('div', { class: 'insp-grid' },
+    el('div', { class: 'full' }, el('div', { class: 'insp-sec' }, 'Brand mark · burned into final export')),
+    el('label', { class: 'field full' }, el('span', { text: 'Watermark text' }), fields.text),
+    el('label', { class: 'field full' }, el('span', { text: 'Position' }), fields.position),
+    el('label', { class: 'field' }, el('span', { text: 'Show' }), fields.enabled),
+    el('label', { class: 'field' }, el('span', { text: 'Opacity (0–1)' }), fields.opacity),
+    el('label', { class: 'field' }, el('span', { text: 'Size (px @1080)' }), fields.size),
+    el('label', { class: 'field' }, el('span', { text: 'Color' }), fields.color),
+    el('label', { class: 'field full' }, el('span', { text: 'Font' }), fields.font),
+    el('label', { class: 'field' }, el('span', { text: 'Weight' }), fields.bold),
+    el('label', { class: 'field' }, el('span', { text: 'Case' }), fields.uppercase),
+    el('label', { class: 'field' }, el('span', { text: 'Letter spacing' }), fields.letterSpacing),
+    el('label', { class: 'field' }, el('span', { text: 'Margin (px)' }), fields.margin),
+    el('div', { class: 'full region-hint', html: 'Vertical positions render like <b>FRAMEFLOW</b> — wide-tracked letters down the edge. Appears in preview and <b>final.mp4</b>.' }),
+  );
+
+  modal({
+    title: 'Watermark',
+    body: grid,
+    actions: [
+      { label: 'Cancel' },
+      { label: 'Apply', class: 'primary', onClick: () => (applyAndClose() ? undefined : false) },
+    ],
+  });
+  setTimeout(() => fields.text.focus(), 80);
+}
+
 function doUndo() {
   if (S.hIndex <= 0) { toast('Nothing to undo'); return; }
   S.hIndex--;
@@ -2792,13 +2901,52 @@ function quickTextAnim(anim) {
   if (!found) { toast('Could not add text clip', true); return; }
   const { track, clip } = found;
   quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
-    text: { ...(clip.text || {}), anim, animDur: anim === 'fade' ? 0.3 : anim === 'flicker' ? 0.45 : 0.35 },
+    text: { ...(clip.text || {}), anim, animDur: anim === 'fade' ? 0.3 : anim === 'flicker' ? 0.45 : anim === 'glitch' ? 0.5 : 0.35 },
   }));
   const labels = {
     fade: 'Fade', pop: 'Pop', 'slide-up': 'Slide up', 'slide-down': 'Slide down',
-    bounce: 'Bounce', 'zoom-in': 'Zoom in', flicker: 'Flicker',
+    bounce: 'Bounce', 'zoom-in': 'Zoom in', flicker: 'Flicker', glitch: 'Glitch',
   };
   toast(`Text animation: ${labels[anim] || anim}`);
+}
+
+/** Add/apply a caption preset on T2 (captions track) at the playhead. */
+function quickCaptionPreset(name) {
+  const preset = CAPTION_PRESETS[name];
+  if (!preset) return;
+  const dur = timelineDuration(S.timeline);
+  const start = S.playhead <= dur ? S.playhead : 0;
+  try {
+    const snap = cloneTimeline(S.timeline);
+    // Reuse selected T2 caption if there is one at the playhead.
+    let found = null;
+    if (S.selection?.trackId === 't2') {
+      try {
+        const c = getClip(S.timeline, 't2', S.selection.clipId);
+        if (c && c.kind === 'text') found = { track: getTrack(S.timeline, 't2'), clip: c };
+      } catch { /* fall through */ }
+    }
+    if (!found) {
+      const track = getTrack(S.timeline, 't2');
+      const overlap = track.clips.some((c) => start < clipEnd(c) - 1e-6 && start + 3 > c.start + 1e-6);
+      const clip = addClip(S.timeline, 't2', {
+        kind: 'text',
+        start: overlap ? findFreeSlot(track, 3, start) : start,
+        duration: Math.min(3, Math.max(1, (dur || 0) - start) || 3),
+        text: { ...preset, content: 'Your caption' },
+      });
+      found = { track, clip };
+    } else {
+      setClipProps(S.timeline, 't2', found.clip.id, { text: { ...preset } });
+    }
+    selectOnly('t2', found.clip.id);
+    commit(snap);
+    renderTimeline(); renderInspector(true); updateFooter(); updatePreviewText(true); syncMedia(true);
+    updatePreviewBadges(); flashPreview(); updateSelBox();
+    toast(`Caption style: ${name}${preset.stagger ? ' · word-by-word' : ''}`);
+    const content = document.querySelector('#inspector textarea');
+    if (content) { content.focus(); content.select(); }
+  } catch (e) { toast(e.message, true); }
 }
 
 /** Make selected media a floating PiP overlay (image→v2, video→v3). */
@@ -3043,6 +3191,7 @@ function renderInspector(focusText = false) {
         : a === 'bounce' ? 'Bounce'
         : a === 'zoom-in' ? 'Zoom in'
         : a === 'flicker' ? 'Flicker'
+        : a === 'glitch' ? 'Glitch (digital)'
         : a)));
     const strokeW = el('input', { class: 'input', type: 'number', min: '0', max: '16', step: '1', value: String(Math.round(t.strokeWidth || 0)) });
     const strokeC = el('input', { class: 'input', type: 'color', value: /^#[0-9a-fA-F]{6}$/.test(t.strokeColor || '') ? t.strokeColor : '#000000', style: 'padding:2px;height:32px' });
@@ -3056,6 +3205,18 @@ function renderInspector(focusText = false) {
     const animDur = el('input', { class: 'input', type: 'number', min: '0.05', max: '2', step: '0.05', value: String(t.animDur ?? 0.3) });
     const fontSel = el('select', { class: 'input' },
       TEXT_FONTS.map((f) => el('option', { value: f, selected: (t.font || 'Arial') === f || undefined }, f)));
+    // Premium typography controls
+    const opacity = el('input', { class: 'input', type: 'number', min: '0.05', max: '1', step: '0.05', value: String(t.opacity ?? 1) });
+    const rotateIn = el('input', { class: 'input', type: 'number', min: '-360', max: '360', step: '1', value: String(Math.round(t.rotate || 0)), title: 'Rotate the text (degrees) — e.g. -90 for vertical' });
+    const glowSel = el('select', { class: 'input' },
+      [['0', 'Off'], ['1', 'On']].map(([v, lab]) =>
+        el('option', { value: v, selected: String(t.glow ? '1' : '0') === v || undefined }, lab)));
+    const glowC = el('input', { class: 'input', type: 'color', value: /^#[0-9a-fA-F]{6}$/.test(t.glowColor || '') ? t.glowColor : '#ffffff', style: 'padding:2px;height:32px' });
+    const glowSize = el('input', { class: 'input', type: 'number', min: '0', max: '40', value: String(Math.round(t.glowSize || 0)) });
+    const staggerSel = el('select', { class: 'input' },
+      [['0', 'Off'], ['1', 'Word-by-word']].map(([v, lab]) =>
+        el('option', { value: v, selected: String(t.stagger ? '1' : '0') === v || undefined }, lab)));
+    const lineHeight = el('input', { class: 'input', type: 'number', min: '0.8', max: '2.4', step: '0.02', value: String(t.lineHeight ?? 1.28) });
 
     const saveText = () => apply(() => setClipProps(S.timeline, track.id, clip.id, {
       text: {
@@ -3071,12 +3232,16 @@ function renderInspector(focusText = false) {
         padX: Number(padX.value), padY: Number(padY.value),
         widthPct: Number(widthPctIn.value),
         font: fontSel.value,
+        opacity: Number(opacity.value), rotate: Number(rotateIn.value),
+        glow: glowSel.value === '1', glowColor: glowC.value, glowSize: Number(glowSize.value),
+        stagger: staggerSel.value === '1', lineHeight: Number(lineHeight.value),
       },
     }));
     content.addEventListener('input', () => { /* live preview */ updatePreviewText(true); });
     content.addEventListener('change', saveText);
     [role, pos, size, color, bg, xPct, yPct, bgMode, bold, upper, italic,
       alignSel, animSel, strokeW, strokeC, shadowSel, ls, padX, padY, widthPctIn, animDur, fontSel,
+      opacity, rotateIn, glowSel, glowC, glowSize, staggerSel, lineHeight,
     ].forEach((c) => c.addEventListener('change', saveText));
 
     const applyPreset = (name) => {
@@ -3087,6 +3252,16 @@ function renderInspector(focusText = false) {
       }));
       toast(`Style: ${name}`);
     };
+    const applyCaptionPreset = (name) => {
+      const p = CAPTION_PRESETS[name];
+      if (!p) return;
+      apply(() => setClipProps(S.timeline, track.id, clip.id, {
+        text: { ...p, content: content.value || p.content },
+      }));
+      toast(`Caption style: ${name}`);
+    };
+
+    const isCaptionTrack = track.id === 't2' || t.role === 'caption' || t.role === 'subtitle';
 
     grid.append(
       el('label', { class: 'field full' }, el('span', { text: 'Content' }), content),
@@ -3098,7 +3273,21 @@ function renderInspector(focusText = false) {
         el('button', { class: 'btn sm', text: 'A Outline', title: 'Outlined text', onclick: () => applyPreset('outline') }),
         el('button', { class: 'btn sm', text: '▮ Caption', title: 'Caption bar', onclick: () => applyPreset('caption') }),
         el('button', { class: 'btn sm', text: '▰ Highlight', title: 'Highlighted phrase', onclick: () => applyPreset('highlight') }),
+        el('button', { class: 'btn sm', text: '🎬 Cinematic', title: 'Wide-tracked cinematic title with glow', onclick: () => applyPreset('cinematic') }),
+        el('button', { class: 'btn sm', text: '👑 Luxury', title: 'Gold luxury serif with glow', onclick: () => applyPreset('luxury') }),
+        el('button', { class: 'btn sm', text: '⚡ Neon', title: 'Flickering neon glow title', onclick: () => applyPreset('neon') }),
+        el('button', { class: 'btn sm', text: '◻ Minimal', title: 'Clean minimal subtitle', onclick: () => applyPreset('minimal') }),
+        el('button', { class: 'btn sm', text: '🛑 Bold hook', title: 'Heavy outlined hook for first 2s', onclick: () => applyPreset('boldhook') }),
         el('button', { class: 'btn sm', text: 'Clear box', title: 'Remove background box from text', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { text: { bgMode: 'none', bg: '' } })) }),
+      ),
+      el('div', { class: 'full' }, el('div', { class: 'insp-sec' }, 'Caption styles (word-by-word · safe area)')),
+      el('div', { class: 'full style-presets' },
+        el('button', { class: 'btn sm', text: 'Clean', title: 'Readable bold white, no box, safe-area bottom', onclick: () => applyCaptionPreset('clean') }),
+        el('button', { class: 'btn sm', text: 'Boxed', title: 'Dark rounded box behind caption', onclick: () => applyCaptionPreset('boxed') }),
+        el('button', { class: 'btn sm', text: 'Outline', title: 'Heavy black outline — readable on anything', onclick: () => applyCaptionPreset('outline') }),
+        el('button', { class: 'btn sm', text: '🔥 Pop', title: 'Yellow pop caption, word-by-word entrance', onclick: () => applyCaptionPreset('pop') }),
+        el('button', { class: 'btn sm', text: '🎤 Karaoke', title: 'Word-by-word reveal with box — reels style', onclick: () => applyCaptionPreset('karaoke') }),
+        el('button', { class: 'btn sm', text: 'Whisper', title: 'Soft italic serif caption', onclick: () => applyCaptionPreset('whisper') }),
       ),
       el('div', { class: 'full' }, el('div', { class: 'insp-sec' }, 'Layout')),
       el('label', { class: 'field' }, el('span', { text: 'Role' }), role),
@@ -3119,12 +3308,20 @@ function renderInspector(focusText = false) {
       el('label', { class: 'field' }, el('span', { text: 'Case' }), upper),
       el('label', { class: 'field' }, el('span', { text: 'Style' }), italic),
       el('label', { class: 'field' }, el('span', { text: 'Letter spacing' }), ls),
-      el('div', { class: 'full' }, el('div', { class: 'insp-sec' }, 'Outline · shadow · motion')),
+      el('label', { class: 'field' }, el('span', { text: 'Line height' }), lineHeight),
+      el('label', { class: 'field' }, el('span', { text: 'Opacity (0–1)' }), opacity),
+      el('div', { class: 'full' }, el('div', { class: 'insp-sec' }, 'Effects · rotation · motion')),
+      el('label', { class: 'field' }, el('span', { text: 'Rotate (°)' }), rotateIn),
       el('label', { class: 'field' }, el('span', { text: 'Stroke px' }), strokeW),
       el('label', { class: 'field' }, el('span', { text: 'Stroke color' }), strokeC),
       el('label', { class: 'field' }, el('span', { text: 'Drop shadow' }), shadowSel),
+      el('label', { class: 'field' }, el('span', { text: 'Glow' }), glowSel),
+      glowSel.value === '1' ? el('label', { class: 'field' }, el('span', { text: 'Glow color' }), glowC) : null,
+      glowSel.value === '1' ? el('label', { class: 'field' }, el('span', { text: 'Glow size' }), glowSize) : null,
+      el('label', { class: 'field' }, el('span', { text: 'Word stagger' }), staggerSel),
       el('label', { class: 'field' }, el('span', { text: 'Animation' }), animSel),
       el('label', { class: 'field' }, el('span', { text: 'Anim (s)' }), animDur),
+      isCaptionTrack ? el('div', { class: 'full region-hint', html: 'Captions on <b>T2</b> also export to <b>captions.srt</b>. Try <b>Karaoke</b> for word-by-word reveal.' }) : null,
     );
     if (focusText) setTimeout(() => { content.focus(); content.select(); }, 60);
   }
@@ -3485,19 +3682,25 @@ function updatePreviewText(force = false) {
   const fw = frame?.clientWidth || 360;
   const frameH = frame?.clientHeight || Math.round(fw * 16 / 9);
   renderTextLayer(layer, fw, frameH);
+  const wmL = document.getElementById('watermarkLayer');
+  if (wmL) renderWatermarkLayer(wmL, fw, frameH);
   if (S.phoneOpen) renderPhoneText();
   updateSelBox();
 }
 
 function textCacheKey() {
   const active = activeClips(S.timeline, S.playhead, ['text']);
-  return active.map((a) => {
+  const wm = S.timeline?.watermark || {};
+  const wmKey = `wm:${wm.enabled ? 1 : 0}:${wm.text || ''}:${wm.position || ''}:${wm.opacity ?? ''}:${wm.size ?? ''}:${wm.color || ''}:${wm.letterSpacing ?? ''}:${wm.margin ?? ''}:${wm.font || ''}:${wm.bold ? 1 : 0}:${wm.uppercase ? 1 : 0}`;
+  return wmKey + '|' + active.map((a) => {
     const s = a.clip.text || {};
     return [
       a.clip.id, s.content, s.role, s.position, s.xPct, s.yPct,
       s.size, s.color, s.bg, s.bgMode, s.bold, s.uppercase, s.italic,
       s.align, s.strokeWidth, s.strokeColor, s.shadow, s.letterSpacing,
       s.padX, s.padY, s.widthPct, s.anim, s.animDur, s.font,
+      s.opacity ?? '', s.glow ? 1 : 0, s.glowColor || '', s.glowSize ?? '',
+      s.stagger ? 1 : 0, s.lineHeight ?? '', s.rotate ?? '',
       a.clip.start, clipEnd(a.clip),
     ].join(':');
   }).join('|');
@@ -3525,6 +3728,25 @@ function renderTextLayer(layer, fw, frameH) {
     const padYs = Math.round((Number(spec.padY) ?? (bgMode === 'full' ? 22 : 10)) * scaleH);
     const anim = normalizeTextAnim(spec.anim);
     const animDur = Math.max(0.05, Number(spec.animDur) || 0.3);
+    const opacity = spec.opacity != null ? Math.min(1, Math.max(0.05, Number(spec.opacity))) : 1;
+    const rotate = Number(spec.rotate) || 0;
+    const glowOn = !!spec.glow && Number(spec.glowSize) > 0;
+    const glowColor = /^#[0-9a-fA-F]{6}$/.test(spec.glowColor || '') ? spec.glowColor : '#ffffff';
+    const glowPx = Math.max(2, Math.round((Number(spec.glowSize) || 10) * scale));
+    const lineHeight = Number(spec.lineHeight) || 1.28;
+
+    // Multi-layer glow (soft neon / cinematic bloom) + drop shadow.
+    const shadows = [];
+    if (glowOn) {
+      shadows.push(
+        `0 0 ${glowPx}px ${glowColor}`,
+        `0 0 ${Math.round(glowPx * 2)}px ${glowColor}bb`,
+        `0 0 ${Math.round(glowPx * 3.5)}px ${glowColor}66`,
+      );
+    }
+    if (spec.shadow) shadows.push('3px 3px 0 rgba(0,0,0,.75)');
+    else if (!glowOn) shadows.push('0 2px 6px rgba(0,0,0,.7), 0 0 2px #000');
+
     const styleParts = [
       `left:${x}%`, `top:${y}%`,
       `font-size:${sizePx}px`,
@@ -3535,20 +3757,30 @@ function renderTextLayer(layer, fw, frameH) {
       lsPx ? `letter-spacing:${lsPx}px` : 'letter-spacing:0',
       'transform:translate(-50%,-50%)',
       stroke ? `-webkit-text-stroke:${Math.max(1, stroke * scale)}px ${/^#[0-9a-fA-F]{6}$/.test(spec.strokeColor || '') ? spec.strokeColor : '#000'}` : '',
-      spec.shadow ? 'text-shadow:3px 3px 0 rgba(0,0,0,.75)' : '',
+      shadows.length ? `text-shadow:${shadows.join(',')}` : '',
+      opacity < 0.999 ? `opacity:${opacity}` : '',
+      `line-height:${lineHeight}`,
       anim !== 'none' ? `animation:txt-${anim} ${animDur}s ease-out both` : '',
     ].filter(Boolean);
 
+    // Font rotation (any angle) — applied around the text center.
+    if (Math.abs(rotate) > 0.05) {
+      const base = styleParts.find((s) => s.startsWith('transform:'));
+      const idxT = styleParts.indexOf(base);
+      const rot = `translate(-50%,-50%) rotate(${rotate}deg)`;
+      if (idxT >= 0) styleParts[idxT] = `transform:${rot}`;
+      else styleParts.push(`transform:${rot}`);
+    }
+
     if (bgCss) {
       if (bgMode === 'full') {
-        // Match FFmpeg strip: padding, optical center at y% (left/width set below).
         styleParts.push(
           'max-width:none', 'box-sizing:border-box',
           `background:${bgCss}`,
           `padding:${padYs}px ${padXs}px`,
           'border-radius:0', `text-align:${normalizeTextAlign(spec.align)}`,
           'line-height:1.28',
-          'transform:translateY(-50%)',
+          Math.abs(rotate) > 0.05 ? '' : 'transform:translateY(-50%)',
         );
       } else {
         styleParts.push(
@@ -3566,12 +3798,39 @@ function renderTextLayer(layer, fw, frameH) {
       styleParts.push(`text-align:${normalizeTextAlign(spec.align)}`);
     }
 
+    /* ---- word-by-word stagger (premium captions) ---- */
+    const staggerOn = !!spec.stagger && content.trim().split(/\s+/).length >= 2 && Math.abs(rotate) < 0.05;
     const node = el('div', {
-      class: bgMode === 'full' ? 'text-ov text-banner' : 'text-ov',
-      text: content,
+      class: bgMode === 'full' ? 'text-ov text-banner' : 'text-ov' + (staggerOn ? ' text-stagger' : ''),
       dataset: { clip: clip.id },
       style: styleParts.filter(Boolean).join(';'),
     });
+
+    if (staggerOn) {
+      const words = content.trim().split(/\s+/);
+      const wins = staggerWordWindows(content, clip.start, clipEnd(clip));
+      const step = wins.length ? wins[0].step : 0.2;
+      words.forEach((w, wi) => {
+        const delay = Math.max(0, wi * step);
+        const span = el('span', {
+          class: 'stg-w',
+          text: w + (wi < words.length - 1 ? ' ' : ''),
+          style: `animation-delay:${delay.toFixed(3)}s`,
+          dataset: { wi: String(wi), t0: String((wins[wi]?.t0 ?? clip.start + delay)) },
+        });
+        // Karaoke: highlight the word currently being spoken based on playhead.
+        const win = wins[wi];
+        if (win && S.playhead >= win.t0 && S.playhead < (wins[wi + 1]?.t0 ?? clipEnd(clip))) {
+          span.classList.add('active');
+        } else if (win && S.playhead >= win.t0) {
+          span.classList.add('shown');
+        }
+        node.append(span);
+      });
+    } else {
+      node.textContent = content;
+    }
+
     if (bgMode === 'full') {
       const widthPct = Math.min(100, Math.max(10, Number(spec.widthPct) || 100));
       const lines = estimateBannerLines(content, spec.size || 64, (S.timeline.width || 1080) * (widthPct / 100), Number(spec.padX) ?? 40, Number(spec.letterSpacing) || 0);
@@ -3581,7 +3840,6 @@ function renderTextLayer(layer, fw, frameH) {
       node.style.alignItems = 'center';
       node.style.justifyContent = normalizeTextAlign(spec.align) === 'left' ? 'flex-start'
         : normalizeTextAlign(spec.align) === 'right' ? 'flex-end' : 'center';
-      // Position strip: full width at widthPct=100; otherwise center on xPct
       if (widthPct >= 99.5) {
         node.style.left = '0';
         node.style.width = '100%';
@@ -3589,11 +3847,65 @@ function renderTextLayer(layer, fw, frameH) {
         const left = Math.max(0, Math.min(100 - widthPct, ((x ?? 50) - widthPct / 2)));
         node.style.left = `${left}%`;
         node.style.width = `${widthPct}%`;
-        node.style.transform = 'translateY(-50%)';
+        if (Math.abs(rotate) < 0.05) node.style.transform = 'translateY(-50%)';
       }
     }
     layer.append(node);
   }
+}
+
+/** Persistent brand watermark preview (matches renderer vertical/horizontal placement). */
+function renderWatermarkLayer(layer, fw, frameH) {
+  if (!layer || !S.timeline) return;
+  layer.innerHTML = '';
+  const wm = normalizeWatermark(S.timeline.watermark);
+  if (!wm.enabled || !String(wm.text || '').trim()) return;
+  const W = S.timeline.width || 1080;
+  const H = S.timeline.height || 1920;
+  const scale = fw / W;
+  const text = wm.uppercase ? wm.text.toUpperCase() : wm.text;
+  const sizePx = Math.max(6, wm.size * scale);
+  const marginPx = wm.margin * scale;
+  const color = /^#[0-9a-fA-F]{6}$/.test(wm.color) ? wm.color : '#ffffff';
+  const vertical = wm.position === 'vertical-left' || wm.position === 'vertical-right';
+
+  const style = [
+    `font-size:${sizePx}px`,
+    `color:${color}`,
+    `opacity:${wm.opacity}`,
+    wm.letterSpacing ? `letter-spacing:${Math.max(1, wm.letterSpacing * scale)}px` : 'letter-spacing:0',
+    wm.bold ? 'font-weight:700' : 'font-weight:400',
+    `font-family:${JSON.stringify(wm.font || 'Arial')},Arial,sans-serif`,
+    'text-shadow:1px 1px 2px rgba(0,0,0,.55)',
+    'white-space:nowrap',
+    'pointer-events:none',
+    'position:absolute',
+  ];
+
+  if (vertical) {
+    style.push('transform-origin:center center');
+    if (wm.position === 'vertical-left') {
+      style.push(`left:${marginPx}px`, 'top:50%', 'transform:translateY(-50%) rotate(-90deg)');
+    } else {
+      style.push(`right:${marginPx}px`, 'top:50%', 'transform:translateY(-50%) rotate(90deg)');
+    }
+  } else {
+    const isLeft = wm.position === 'top-left' || wm.position === 'bottom-left';
+    const isRight = wm.position === 'top-right' || wm.position === 'bottom-right';
+    const isTop = wm.position === 'top-left' || wm.position === 'top-right' || wm.position === 'top';
+    const isBottom = wm.position === 'bottom-left' || wm.position === 'bottom-right' || wm.position === 'bottom';
+    style.push('transform:translate(0,0)');
+    if (isLeft) style.push(`left:${marginPx}px`);
+    else if (isRight) style.push(`right:${marginPx}px`);
+    else style.push('left:50%', 'transform:translateX(-50%)');
+    if (isTop) style.push(`top:${marginPx}px`);
+    else if (isBottom) style.push(`bottom:${marginPx}px`);
+    else if (wm.position === 'center') style.push('top:50%', 'transform:translate(-50%,-50%)');
+    else style.push('top:50%', 'transform:translate(-50%,-50%)');
+    if (wm.position === 'center') style.push('left:50%', 'top:50%');
+  }
+
+  layer.append(el('div', { class: 'wm-ov', text, style: style.join(';') }));
 }
 
 /* ================= footer / render ================= */

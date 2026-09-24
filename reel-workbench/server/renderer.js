@@ -6,7 +6,7 @@ import { assertInsideData } from './paths.js';
 import { run, progressSeconds } from './ffmpeg.js';
 import { probeMedia } from './probe.js';
 import { getSettings, getProject, saveProject, readTimeline, mediaAbsolutePath, getMedia, DIRS, ensureProjectDirs } from './store.js';
-import { validateTimeline, timelineDuration, getTrack, clipEnd, round3, EPS, getLayoutMode, isSplitLayout, splitPanes, normalizeTransform, FIT_MODES, normalizeEffect, bgToFfmpeg, BG_MODES, normalizeTextAnim, normalizeTextAlign, estimateBannerLines, bannerBoxHeight, keyframeExpr, normalizeTransition } from '../shared/timeline-ops.js';
+import { validateTimeline, timelineDuration, getTrack, clipEnd, round3, EPS, getLayoutMode, isSplitLayout, splitPanes, normalizeTransform, FIT_MODES, normalizeEffect, bgToFfmpeg, BG_MODES, normalizeTextAnim, normalizeTextAlign, estimateBannerLines, bannerBoxHeight, keyframeExpr, normalizeTransition, normalizeWatermark, staggerWordWindows, estimateWordWidth, staggerWords } from '../shared/timeline-ops.js';
 import { log } from './logger.js';
 import { captionForProject } from './captions.js';
 
@@ -93,6 +93,26 @@ function hexColor(color, fallback = '0xFFFFFF') {
   return m ? `0x${m[1]}` : fallback;
 }
 
+/** fontcolor with optional opacity: 0xRRGGBB@alpha */
+function fontColorWithOpacity(color, opacity) {
+  const base = hexColor(color);
+  const a = Number(opacity);
+  if (!Number.isFinite(a) || a >= 0.999) return base;
+  return `${base}@${round3(Math.min(1, Math.max(0.05, a)))}`;
+}
+
+/**
+ * drawtext rendered onto a fully transparent lavfi layer (watermark strip, rotated text)
+ * applies the alpha about three times before overlay composites it. Empirical fit on
+ * FFmpeg 9: effective = a³. Pre-compensate with cube root so requested opacity matches output.
+ */
+function cbrtAlpha(opacity) {
+  const a = Number(opacity);
+  if (!Number.isFinite(a) || a <= 0) return 0;
+  if (a >= 0.999) return 1;
+  return round3(Math.cbrt(a));
+}
+
 function bgColor(bg) {
   const s = String(bg || '');
   if (!s) return null;
@@ -162,6 +182,15 @@ export function buildTextAlpha(anim, start, end, animDur = 0.3) {
     const half = round3(period / 2);
     return `if(lt(t,${s}),0,if(lt(t,${round3(s + d)}),`
       + `if(lt(mod(t-${s},${period}),${half}),0,1),`
+      + `if(lt(t,${round3(e - dOut)}),1,(${e}-t)/${dOut})))`;
+  }
+  if (a === 'glitch') {
+    // Snap in with a couple of hard alpha drops during entrance, then solid.
+    const dIn = Math.min(d, 0.4);
+    const dOut = Math.min(d, 0.15);
+    if (e <= s + dIn + dOut) return null;
+    return `if(lt(t,${s}),0,if(lt(t,${round3(s + dIn)}),`
+      + `if(lt(mod(t-${s},0.1),0.04),0.15,1),`
       + `if(lt(t,${round3(e - dOut)}),1,(${e}-t)/${dOut})))`;
   }
   // pop / bounce / zoom-in / slide: snap-in with ease, gentle out
@@ -652,6 +681,18 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
     if (textClips.length && !detectFontFile()) {
       throw new RenderError('No usable font file found for text rendering. Install a system font (e.g. Arial, DejaVu Sans).', { stage: 'composite' });
     }
+
+    /** Push glow-pass (optional) + main drawtext onto baseLabel → new label. */
+    const applyDrawtext = (baseLabel, opts, { glowOpts = null, tag } = {}) => {
+      let label = baseLabel;
+      if (glowOpts && glowOpts.length) {
+        filters.push(`[${label}]drawtext=${glowOpts.join(':')}[gl${tag}]`);
+        label = `gl${tag}`;
+      }
+      filters.push(`[${label}]drawtext=${opts.join(':')}[tx${tag}]`);
+      return `tx${tag}`;
+    };
+
     textClips.forEach((t, i) => {
       const txtFile = join(workDir, `txt-${i}.txt`);
       const rawContent = t.content || '';
@@ -679,27 +720,162 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
       const alphaExpr = buildTextAlpha(spec.anim, start, end, spec.animDur);
       const yBase = `(h-text_h)*${round3(yPct)}/100`;
       const yExpr = buildTextY(spec.anim, start, spec.animDur, yBase);
+      const opacity = spec.opacity != null ? Number(spec.opacity) : 1;
+      const rotate = Number(spec.rotate) || 0;
+      const fontCol = fontColorWithOpacity(spec.color, opacity);
+      const glowOn = !!spec.glow && Number(spec.glowSize) > 0;
+      const glowCol = hexColor(spec.glowColor, '0xFFFFFF');
+      const glowSize = Math.max(2, Math.min(40, Math.round(Number(spec.glowSize) || 10)));
+      const lineH = Number(spec.lineHeight) || 1.28;
+      const stagger = !!spec.stagger && staggerWords(content).length >= 2;
 
       const drawCommon = [
         `fontfile='${escFilterPath(fontFile)}'`,
         `textfile='${escFilterPath(txtFile)}'`,
         `fontsize=${size}`,
-        `fontcolor=${hexColor(spec.color)}`,
-        // stroke/outline (premium meme look)
-        `borderw=${strokeW > 0 ? strokeW : (spec.bold === false ? 0 : 0)}`,
+        `fontcolor=${fontCol}`,
+        `borderw=${strokeW > 0 ? strokeW : 0}`,
         `bordercolor=${strokeW > 0 ? hexColor(spec.strokeColor, '0x000000') : 'black@0'}`,
-        // soft drop shadow
         spec.shadow ? 'shadowx=3' : 'shadowx=0',
         spec.shadow ? 'shadowy=3' : 'shadowy=0',
         spec.shadow ? `shadowcolor=${hexColor(spec.strokeColor, '0x000000')}@0.75` : 'shadowcolor=black@0',
-        `line_spacing=${Math.round(size * 0.12)}`,
+        `line_spacing=${Math.round(size * lineH * 0.78)}`,
         `x=${buildTextX(align, xPct, bgMode === 'full' ? padX : 8)}`,
         `y=${yExpr}`,
         enable,
       ];
-      // note: this FFmpeg 9.0.2 build has no drawtext letter_spacing option — keep spacing in preview only
       void ls;
       if (alphaExpr) drawCommon.push(`alpha='${alphaExpr}'`);
+
+      const glowCommon = glowOn ? [
+        `fontfile='${escFilterPath(fontFile)}'`,
+        `textfile='${escFilterPath(txtFile)}'`,
+        `fontsize=${size}`,
+        `fontcolor=${glowCol}@${round3(Math.min(0.85, opacity * 0.55))}`,
+        `borderw=${glowSize}`,
+        `bordercolor=${glowCol}@0.55`,
+        'shadowx=0', 'shadowy=0', 'shadowcolor=black@0',
+        `line_spacing=${Math.round(size * lineH * 0.78)}`,
+        `x=${buildTextX(align, xPct, bgMode === 'full' ? padX : 8)}`,
+        `y=${yExpr}`,
+        enable,
+      ] : null;
+      if (glowCommon && alphaExpr) glowCommon.push(`alpha='${alphaExpr}'`);
+
+      /* ---- word-by-word stagger captions ---- */
+      if (stagger && bgMode !== 'full') {
+        const wins = staggerWordWindows(content, start, end);
+        if (wins.length) {
+          const spaceW = Math.ceil(size * 0.3 + ls);
+          const widths = wins.map((w) => estimateWordWidth(w.word, size, ls));
+          const totalW = widths.reduce((a, b) => a + b, 0) + spaceW * (wins.length - 1);
+          let cursor = 0;
+          if (align === 'center') cursor = Math.round((W - totalW) / 2);
+          else if (align === 'right') cursor = Math.round(W - totalW - Math.max(8, padX));
+          else cursor = Math.max(8, padX);
+          if (box && bgMode === 'inline') {
+            const bx = Math.max(0, Math.round(cursor - padX));
+            const bw = Math.min(W, Math.round(totalW + padX * 2));
+            const bh = Math.ceil(size * lineH + padY * 1.6);
+            const by = `floor(h*${round3(yPct)}/100 - ${bh}/2)`;
+            const boxColor = box.includes('@') ? box : `${box}@1`;
+            filters.push(
+              `[${videoLabel}]drawbox=x=${bx}:y=${by}:w=${bw}:h=${bh}:color=${boxColor}:t=fill:${enable}[sbx${i}]`
+            );
+            videoLabel = `sbx${i}`;
+          }
+          let label = videoLabel;
+          for (let wi = 0; wi < wins.length; wi++) {
+            const wpath = join(workDir, `txt-${i}-w${wi}.txt`);
+            writeFileSync(wpath, wins[wi].word, 'utf8');
+            const wStart = wins[wi].t0;
+            const wAlpha = (spec.anim && spec.anim !== 'none'
+              ? buildTextAlpha(spec.anim, wStart, end, Math.min(0.3, (wins[wi].step || 0.2) * 2))
+              : null) || `if(lt(t,${wStart}),0,1)`;
+            const wx = Math.round(cursor);
+            const borderW = strokeW > 0 ? strokeW : (spec.bold !== false && bgMode === 'none' ? Math.max(2, Math.round(size * 0.045)) : 0);
+            const borderC = strokeW > 0 ? hexColor(spec.strokeColor, '0x000000') : (borderW ? 'black@0.92' : 'black@0');
+            const wOpts = [
+              `fontfile='${escFilterPath(fontFile)}'`,
+              `textfile='${escFilterPath(wpath)}'`,
+              `fontsize=${size}`,
+              `fontcolor=${fontCol}`,
+              `borderw=${borderW}`,
+              `bordercolor=${borderC}`,
+              spec.shadow ? 'shadowx=3' : 'shadowx=0',
+              spec.shadow ? 'shadowy=3' : 'shadowy=0',
+              spec.shadow ? `shadowcolor=${hexColor(spec.strokeColor, '0x000000')}@0.75` : 'shadowcolor=black@0',
+              `x=${wx}`,
+              `y=${yBase}`,
+              `enable='between(t,${wStart},${end})'`,
+              `alpha='${wAlpha}'`,
+            ];
+            if (glowOn) {
+              const gOpts = [
+                `fontfile='${escFilterPath(fontFile)}'`,
+                `textfile='${escFilterPath(wpath)}'`,
+                `fontsize=${size}`,
+                `fontcolor=${glowCol}@0.7`,
+                `borderw=${glowSize}`,
+                `bordercolor=${glowCol}@0.5`,
+                'shadowx=0', 'shadowy=0', 'shadowcolor=black@0',
+                `x=${wx}`,
+                `y=${yBase}`,
+                `enable='between(t,${wStart},${end})'`,
+                `alpha='${wAlpha}'`,
+              ];
+              filters.push(`[${label}]drawtext=${gOpts.join(':')}[gl${i}_${wi}]`);
+              label = `gl${i}_${wi}`;
+            }
+            filters.push(`[${label}]drawtext=${wOpts.join(':')}[tx${i}_${wi}]`);
+            label = `tx${i}_${wi}`;
+            cursor += widths[wi] + spaceW;
+          }
+          videoLabel = label;
+          return;
+        }
+      }
+
+      /* ---- rotated text: draw on transparent layer, rotate, overlay ---- */
+      if (Math.abs(rotate) > 0.05) {
+        const nLines = Math.max(1, content.split('\n').length);
+        const estW = Math.min(W, Math.ceil(content.replace(/\n/g, ' ').length * size * 0.62 + padX * 2 + glowSize + strokeW * 2 + 32));
+        const estH = Math.ceil(nLines * size * lineH + padY * 2 + glowSize + strokeW * 2 + 20);
+        const idx = inputCount++;
+        const clipDur = Math.max(0.1, end - start);
+        inputArgs.push('-f', 'lavfi', '-t', String(clipDur), '-i', `color=c=black@0.0:s=${estW}x${estH}:r=${FPS},format=rgba`);
+        // setpts shifts this layer's t to main-timeline time → enable/alpha keep absolute times.
+        const fixLayerAlpha = (o) => o.replace(
+          /^(fontcolor|bordercolor|shadowcolor)=([^@]+)@([0-9.]+)/,
+          (_, k, c, a) => `${k}=${c}@${cbrtAlpha(Number(a))}`,
+        );
+        const toLayer = (arr) => arr.map((o) => {
+          const f = fixLayerAlpha(o);
+          if (f.startsWith('x=')) return 'x=(w-text_w)/2';
+          if (f.startsWith('y=')) return 'y=(h-text_h)/2';
+          return f;
+        });
+        const layerMain = toLayer(drawCommon);
+        const layerGlow = glowCommon ? toLayer(glowCommon) : null;
+        const boxPre = (box && (bgMode === 'inline' || bgMode === 'full'))
+          ? `drawbox=x=0:y=0:w=iw:h=ih:color=${box.includes('@') ? box : `${box}@1`}:t=fill,`
+          : '';
+        const drawOnLayer = layerGlow
+          ? `drawtext=${layerGlow.join(':')},drawtext=${layerMain.join(':')}`
+          : `drawtext=${layerMain.join(':')}`;
+        filters.push(
+          `[${idx}:v]setpts=PTS-STARTPTS+${round3(start)}/TB,${boxPre}${drawOnLayer}[rw${i}]`
+        );
+        filters.push(`[rw${i}]rotate=a='${round3(rotate)}*PI/180':ow=iw:oh=ih:fillcolor=none[rr${i}]`);
+        // Place layer center at the same optical point non-rotated text would use.
+        const oX = `((W-w)*${round3(xPct)}/100 + w/2) - w/2`;
+        const oY = `((H-h)*${round3(yPct)}/100 + h/2) - h/2`;
+        filters.push(
+          `[${videoLabel}][rr${i}]overlay=x='${oX}':y='${oY}':eof_action=pass:${enable}[rx${i}]`
+        );
+        videoLabel = `rx${i}`;
+        return;
+      }
 
       // Full-width top/banner strip: drawbox sized to real word-wrap, then text.
       if (bgMode === 'full' && box) {
@@ -736,8 +912,12 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
           if (o.startsWith('x=')) return xCommon;
           return o;
         });
-        filters.push(`[${videoLabel}]drawtext=${opts.join(':')}[tx${i}]`);
-        videoLabel = `tx${i}`;
+        const gOpts = glowCommon ? glowCommon.map((o) => {
+          if (o.startsWith('y=')) return `y=${boxY}+(${bannerH}-text_h)/2${slideOff}`;
+          if (o.startsWith('x=')) return xCommon;
+          return o;
+        }) : null;
+        videoLabel = applyDrawtext(videoLabel, opts, { glowOpts: gOpts, tag: i });
         return;
       }
 
@@ -751,9 +931,65 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
         opts[4] = `borderw=${bw}`;
         opts[5] = 'bordercolor=black@0.92';
       }
-      filters.push(`[${videoLabel}]drawtext=${opts.join(':')}[tx${i}]`);
-      videoLabel = `tx${i}`;
+      videoLabel = applyDrawtext(videoLabel, opts, { glowOpts: glowCommon, tag: i });
     });
+
+    /* ---- project watermark (brand / FRAMEFLOW-style edge mark) ---- */
+    const wm = normalizeWatermark(timeline.watermark);
+    if (wm.enabled && wm.text.trim()) {
+      const wmFont = detectFontFile(wm.font) || detectFontFile();
+      if (!wmFont) throw new RenderError('No usable font file found for watermark text.', { stage: 'composite' });
+      const wmRaw = wm.uppercase ? wm.text.toUpperCase() : wm.text;
+      const wmText = wm.letterSpacing > 0 ? [...wmRaw].join(' ') : wmRaw;
+      const wmFile = join(workDir, 'watermark.txt');
+      writeFileSync(wmFile, wmText, 'utf8');
+      const wmSize = wm.size;
+      const wmAlpha = round3(cbrtAlpha(wm.opacity)); // drawtext on transparent layer applies alpha ~3×, compensate
+      const wmColor = `${hexColor(wm.color)}@${wmAlpha}`;
+      const vertical = wm.position === 'vertical-left' || wm.position === 'vertical-right';
+      const margin = wm.margin;
+      const wmBorder = wm.bold ? Math.max(1, Math.round(wmSize * 0.05)) : 0;
+      const wmShadow = `shadowx=1:shadowy=1:shadowcolor=black@${round3(wmAlpha * 0.5)}`;
+
+      if (!vertical) {
+        const xExpr = (wm.position === 'top-left' || wm.position === 'bottom-left')
+          ? String(margin)
+          : (wm.position === 'top-right' || wm.position === 'bottom-right')
+            ? `w-text_w-${margin}`
+            : '(w-text_w)/2';
+        const yExpr = (wm.position === 'top-left' || wm.position === 'top-right' || wm.position === 'top')
+          ? String(margin)
+          : (wm.position === 'bottom-left' || wm.position === 'bottom-right' || wm.position === 'bottom')
+            ? `h-text_h-${margin}`
+            : '(h-text_h)/2';
+        filters.push(
+          `[${videoLabel}]drawtext=fontfile='${escFilterPath(wmFont)}':textfile='${escFilterPath(wmFile)}':`
+          + `fontsize=${wmSize}:fontcolor=${wmColor}:borderw=${wmBorder}:`
+          + `bordercolor=${hexColor(wm.color)}@${round3(wmAlpha * 0.45)}:${wmShadow}:`
+          + `x=${xExpr}:y=${yExpr}[wmx]`
+        );
+        videoLabel = 'wmx';
+      } else {
+        // Vertical: render on a transparent strip, transpose 90°, overlay on the edge.
+        const stripW = Math.min(W, Math.ceil(wmText.length * wmSize * 0.68 + wmSize));
+        const stripH = Math.max(4, Math.ceil(wmSize * 1.6));
+        const idx = inputCount++;
+        inputArgs.push('-f', 'lavfi', '-t', String(duration), '-i', `color=c=black@0.0:s=${stripW}x${stripH}:r=${FPS},format=rgba`);
+        filters.push(
+          `[${idx}:v]drawtext=fontfile='${escFilterPath(wmFont)}':textfile='${escFilterPath(wmFile)}':`
+          + `fontsize=${wmSize}:fontcolor=${wmColor}:borderw=${wmBorder}:`
+          + `bordercolor=${hexColor(wm.color)}@${round3(wmAlpha * 0.45)}:${wmShadow}:`
+          + `x=(w-text_w)/2:y=(h-text_h)/2[wmh]`
+        );
+        // vertical-left: 90° CCW (reads bottom→top) · vertical-right: 90° CW (top→bottom)
+        const tp = wm.position === 'vertical-left' ? 2 : 1;
+        filters.push(`[wmh]transpose=${tp}[wmv]`);
+        const oX = vertical && wm.position === 'vertical-left' ? String(margin) : `W-w-${margin}`;
+        filters.push(`[${videoLabel}][wmv]overlay=x='${oX}':y='(H-h)/2':eof_action=pass[wmo]`);
+        videoLabel = 'wmo';
+      }
+    }
+
     if (videoLabel === 'vc' || videoLabel === 'p0') {
       filters.push(`[${videoLabel}]null[vout]`);
     } else {
@@ -786,6 +1022,9 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
     }
 
     const exp = settings.export || {};
+    if (process.env.REEL_DEBUG_FILTER) {
+      try { writeFileSync(join(outDir, 'filter.txt'), `INPUTS:\n${inputArgs.join('\n')}\n\nFILTERS:\n${filters.join(';')}\n`, 'utf8'); } catch { /* debug only */ }
+    }
     const outArgs = [
       ...inputArgs,
       '-filter_complex', filters.join(';'),

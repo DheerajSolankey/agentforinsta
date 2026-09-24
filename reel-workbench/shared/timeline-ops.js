@@ -13,14 +13,66 @@ export const FIT_MODES = ['cover', 'contain', 'fill'];
 export const LAYOUT_MODES = ['none', 'split-h', 'split-v'];
 export const EFFECTS = ['none', 'bw', 'sepia', 'warm', 'cool', 'vivid', 'vintage', 'teal', 'golden', 'noir', 'neon', 'luxury', 'vignette', 'soft'];
 export const BG_MODES = ['none', 'inline', 'full'];
-export const TEXT_ANIMS = ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in', 'flicker'];
+export const TEXT_ANIMS = ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in', 'flicker', 'glitch'];
 export const TEXT_ALIGNS = ['left', 'center', 'right'];
-export const TEXT_FONTS = ['Arial', 'Impact', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Segoe UI', 'Courier New'];
+export const TEXT_FONTS = [
+  'Arial', 'Arial Black', 'Impact', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Segoe UI', 'Courier New',
+  'Bahnschrift', 'Candara', 'Corbel', 'Century Gothic', 'Franklin Gothic Medium', 'Gill Sans MT',
+  'Book Antiqua', 'Palatino Linotype', 'Constantia', 'Copperplate', 'Garamond', 'Bookman Old Style',
+  'Rockwell', 'Calibri', 'Cambria', 'Consolas', 'MS Gothic',
+];
 export const TRANSITIONS = ['none', 'fade', 'dip', 'flash', 'zoom', 'slide'];
 export const KEYFRAME_PROPS = ['scale', 'posX', 'posY', 'rotate', 'opacity', 'volume'];
 /** Per-keyframe segment curves (applies from a point to the next). Default linear. */
 export const EASE_MODES = ['linear', 'in', 'out', 'ease'];
 export const MAX_FADE_SEC = 10;
+
+/** Project-wide brand watermark positions (burned into export + preview). */
+export const WATERMARK_POSITIONS = [
+  'vertical-left', 'vertical-right',
+  'top-left', 'top-right', 'bottom-left', 'bottom-right',
+  'top', 'bottom', 'center',
+];
+
+export function normalizeWatermarkPosition(pos) {
+  return WATERMARK_POSITIONS.includes(pos) ? pos : 'bottom-right';
+}
+
+/** Default watermark: off until the user enables it in the workbench. */
+export function defaultWatermark() {
+  return {
+    enabled: false,
+    text: '',
+    position: 'vertical-left',
+    opacity: 0.55,
+    size: 26,
+    color: '#ffffff',
+    font: 'Arial',
+    bold: false,
+    uppercase: true,
+    letterSpacing: 10,
+    margin: 40,
+  };
+}
+
+/** Normalize timeline.watermark (additive — safe on old timelines). */
+export function normalizeWatermark(wm) {
+  const base = defaultWatermark();
+  if (!wm || typeof wm !== 'object') return base;
+  return {
+    enabled: !!wm.enabled,
+    text: String(wm.text ?? base.text).slice(0, 80),
+    position: normalizeWatermarkPosition(wm.position),
+    opacity: clamp(Number(wm.opacity) || base.opacity, 0.05, 1),
+    size: clamp(Math.round(Number(wm.size) || base.size), 8, 160),
+    color: hexOr(wm.color, base.color),
+    font: wm.font || base.font,
+    bold: wm.bold == null ? base.bold : !!wm.bold,
+    uppercase: wm.uppercase == null ? base.uppercase : !!wm.uppercase,
+    letterSpacing: clamp(Math.round(Number(wm.letterSpacing) || 0), 0, 40),
+    margin: clamp(Math.round(Number(wm.margin) || base.margin), 0, 300),
+  };
+}
 
 /** One-click premium text looks (merged onto clip.text). */
 export const TEXT_PRESETS = {
@@ -78,6 +130,121 @@ export const TEXT_PRESETS = {
     letterSpacing: 1, anim: 'pop', animDur: 0.3,
     xPct: 50, yPct: 50,
   },
+  // ---- premium looks (high-end typography) ----
+  cinematic: {
+    content: 'A CINEMATIC MOMENT', role: 'title', position: 'center',
+    size: 64, color: '#f5f5f7', bg: '', bgMode: 'none',
+    bold: false, uppercase: true, italic: false,
+    align: 'center', padX: 20, padY: 12,
+    strokeWidth: 0, strokeColor: '#000000', shadow: true,
+    letterSpacing: 14, anim: 'fade', animDur: 0.6,
+    xPct: 50, yPct: 46, font: 'Franklin Gothic Medium',
+    glow: true, glowColor: '#ffffff', glowSize: 14, opacity: 1, lineHeight: 1.35,
+  },
+  luxury: {
+    content: 'LUXURY REDEFINED', role: 'title', position: 'center',
+    size: 58, color: '#e8c87a', bg: 'black@0.35', bgMode: 'inline',
+    bold: false, uppercase: true, italic: false,
+    align: 'center', padX: 36, padY: 20,
+    strokeWidth: 0, strokeColor: '#000000', shadow: true,
+    letterSpacing: 10, anim: 'fade', animDur: 0.5,
+    xPct: 50, yPct: 50, font: 'Palatino Linotype',
+    glow: true, glowColor: '#f0c878', glowSize: 12, opacity: 1, lineHeight: 1.3,
+  },
+  neon: {
+    content: 'NEON NIGHTS', role: 'hook', position: 'center',
+    size: 88, color: '#7df9ff', bg: '', bgMode: 'none',
+    bold: true, uppercase: true, italic: false,
+    align: 'center', padX: 16, padY: 10,
+    strokeWidth: 3, strokeColor: '#0a0a1a', shadow: true,
+    letterSpacing: 6, anim: 'flicker', animDur: 0.5,
+    xPct: 50, yPct: 50, font: 'Impact',
+    glow: true, glowColor: '#00e5ff', glowSize: 22, opacity: 1, lineHeight: 1.2,
+  },
+  minimal: {
+    content: 'keep it simple', role: 'subtitle', position: 'bottom',
+    size: 40, color: '#ffffff', bg: '', bgMode: 'none',
+    bold: false, uppercase: false, italic: false,
+    align: 'center', padX: 12, padY: 8,
+    strokeWidth: 0, strokeColor: '#000000', shadow: true,
+    letterSpacing: 4, anim: 'fade', animDur: 0.4,
+    xPct: 50, yPct: 84, font: 'Segoe UI',
+    glow: false, opacity: 0.92, lineHeight: 1.4,
+  },
+  boldhook: {
+    content: 'STOP SCROLLING', role: 'hook', position: 'top',
+    size: 78, color: '#ffffff', bg: '', bgMode: 'none',
+    bold: true, uppercase: true, italic: false,
+    align: 'center', padX: 20, padY: 14,
+    strokeWidth: 7, strokeColor: '#000000', shadow: true,
+    letterSpacing: 2, anim: 'pop', animDur: 0.3,
+    xPct: 50, yPct: 16, font: 'Arial Black',
+    glow: false, opacity: 1, lineHeight: 1.15,
+  },
+};
+
+/** One-click caption styles (t2 / role=caption) — tuned for readability + Reels safe area. */
+export const CAPTION_PRESETS = {
+  clean: {
+    content: 'Caption line', role: 'caption', position: 'bottom',
+    size: 46, color: '#ffffff', bg: '', bgMode: 'none',
+    bold: true, uppercase: false, italic: false,
+    align: 'center', padX: 16, padY: 10,
+    strokeWidth: 0, strokeColor: '#000000', shadow: true,
+    letterSpacing: 1, anim: 'fade', animDur: 0.2,
+    xPct: 50, yPct: 84, font: 'Segoe UI',
+    glow: false, opacity: 1, stagger: false, lineHeight: 1.3,
+  },
+  boxed: {
+    content: 'Caption line', role: 'caption', position: 'bottom',
+    size: 44, color: '#ffffff', bg: 'black@0.62', bgMode: 'inline',
+    bold: true, uppercase: false, italic: false,
+    align: 'center', padX: 22, padY: 12,
+    strokeWidth: 0, strokeColor: '#000000', shadow: false,
+    letterSpacing: 1, anim: 'pop', animDur: 0.22,
+    xPct: 50, yPct: 84, font: 'Segoe UI',
+    glow: false, opacity: 1, stagger: false, lineHeight: 1.3,
+  },
+  outline: {
+    content: 'Caption line', role: 'caption', position: 'bottom',
+    size: 48, color: '#ffffff', bg: '', bgMode: 'none',
+    bold: true, uppercase: false, italic: false,
+    align: 'center', padX: 16, padY: 10,
+    strokeWidth: 5, strokeColor: '#000000', shadow: true,
+    letterSpacing: 1, anim: 'pop', animDur: 0.25,
+    xPct: 50, yPct: 84, font: 'Arial Black',
+    glow: false, opacity: 1, stagger: false, lineHeight: 1.25,
+  },
+  pop: {
+    content: 'Caption line', role: 'caption', position: 'bottom',
+    size: 52, color: '#ffe600', bg: '', bgMode: 'none',
+    bold: true, uppercase: true, italic: false,
+    align: 'center', padX: 16, padY: 10,
+    strokeWidth: 6, strokeColor: '#000000', shadow: true,
+    letterSpacing: 2, anim: 'pop', animDur: 0.28,
+    xPct: 50, yPct: 84, font: 'Arial Black',
+    glow: true, glowColor: '#ffaa00', glowSize: 10, opacity: 1, stagger: true, lineHeight: 1.2,
+  },
+  karaoke: {
+    content: 'Word by word caption', role: 'caption', position: 'bottom',
+    size: 48, color: '#ffffff', bg: 'black@0.45', bgMode: 'inline',
+    bold: true, uppercase: false, italic: false,
+    align: 'center', padX: 20, padY: 12,
+    strokeWidth: 0, strokeColor: '#000000', shadow: true,
+    letterSpacing: 1, anim: 'none', animDur: 0.2,
+    xPct: 50, yPct: 84, font: 'Segoe UI',
+    glow: false, opacity: 1, stagger: true, lineHeight: 1.3,
+  },
+  whisper: {
+    content: 'soft spoken caption', role: 'caption', position: 'bottom',
+    size: 38, color: '#f0f1f5', bg: '', bgMode: 'none',
+    bold: false, uppercase: false, italic: true,
+    align: 'center', padX: 14, padY: 8,
+    strokeWidth: 0, strokeColor: '#000000', shadow: true,
+    letterSpacing: 3, anim: 'fade', animDur: 0.35,
+    xPct: 50, yPct: 85, font: 'Georgia',
+    glow: false, opacity: 0.95, stagger: false, lineHeight: 1.4,
+  },
 };
 
 export const TRACK_DEFS = [
@@ -115,6 +282,7 @@ export function createTimeline({ width = 1080, height = 1920, fps = 30 } = {}) {
     fps,
     markers: [],
     layout: { mode: 'none' },
+    watermark: defaultWatermark(),
     tracks: TRACK_DEFS.map((t) => ({
       id: t.id,
       type: t.type,
@@ -598,6 +766,14 @@ function normalizeText(text) {
     widthPct: clamp(text.widthPct != null ? Number(text.widthPct) : 100, 10, 100),
     anim: normalizeTextAnim(text.anim),
     animDur: clamp(Number(text.animDur) || 0.3, 0.05, 2),
+    // Premium typography
+    opacity: clamp(text.opacity != null ? Number(text.opacity) : 1, 0.05, 1),
+    glow: !!text.glow,
+    glowColor: hexOr(text.glowColor, '#ffffff'),
+    glowSize: clamp(Number(text.glowSize) || 0, 0, 40),
+    stagger: !!text.stagger,
+    lineHeight: clamp(Number(text.lineHeight) || 1.28, 0.8, 2.4),
+    rotate: round3(clamp(Number.isFinite(Number(text.rotate)) ? Number(text.rotate) : 0, -360, 360)),
   };
 }
 
@@ -637,6 +813,49 @@ export function bannerBoxHeight(lines, size, padY) {
   const P = Math.max(0, Number(padY) || 0);
   const N = Math.max(1, Math.round(Number(lines) || 1));
   return Math.ceil(N * S * 1.28 + P * 2);
+}
+
+/**
+ * Split caption/content into stagger words for word-by-word entrance.
+ * Returns [] when stagger is off or text is a single word.
+ */
+export function staggerWords(text) {
+  const s = String(text || '').trim();
+  if (!s) return [];
+  const words = s.split(/\s+/).filter(Boolean);
+  return words.length >= 2 ? words : [];
+}
+
+/**
+ * Per-word time windows for stagger captions over [start, end].
+ * Each word pops in sequentially and stays visible. Exported for renderer + preview.
+ * Returns [{ word, i, t0, t1 }] with t0/t1 absolute timeline seconds.
+ */
+export function staggerWordWindows(text, start, end) {
+  const words = staggerWords(text);
+  const s = Number(start) || 0;
+  const e = Number(end) || 0;
+  if (!words.length || e <= s) return [];
+  const n = words.length;
+  // Fit entrances in the first 60% of the clip (min 0.08s per word, cap total entrance span).
+  const entranceSpan = Math.min(e - s, Math.max(0.08 * n, Math.min((e - s) * 0.6, n * 0.22)));
+  const step = entranceSpan / n;
+  return words.map((word, i) => ({
+    word,
+    i,
+    t0: round3(s + i * step),
+    t1: e,
+    step: round3(step),
+  }));
+}
+
+/** Approximate drawtext/DOM width of a word (px @ given font size). Mirrors estimateBannerLines metrics. */
+export function estimateWordWidth(word, size, letterSpacing = 0) {
+  const S = Math.max(8, Number(size) || 48);
+  const LS = Math.max(0, Number(letterSpacing) || 0);
+  const chars = String(word || '').length;
+  if (!chars) return 0;
+  return Math.ceil(chars * (S * 0.56 + LS));
 }
 
 export function clamp(n, min, max) {
@@ -935,6 +1154,25 @@ export function validateTimeline(timeline) {
       err('BAD_LAYOUT_MODE', `layout.mode must be one of: ${LAYOUT_MODES.join(', ')}`);
     }
   }
+  if (timeline.watermark != null) {
+    if (typeof timeline.watermark !== 'object' || timeline.watermark === null || Array.isArray(timeline.watermark)) {
+      err('BAD_WATERMARK', 'timeline.watermark must be an object');
+    } else {
+      const wm = timeline.watermark;
+      if (wm.enabled && !String(wm.text || '').trim()) {
+        err('WATERMARK_NO_TEXT', 'watermark.enabled requires non-empty watermark.text');
+      }
+      if (wm.position != null && !WATERMARK_POSITIONS.includes(wm.position)) {
+        err('BAD_WATERMARK_POS', `watermark.position must be one of: ${WATERMARK_POSITIONS.join(', ')}`);
+      }
+      if (wm.opacity != null && (!Number.isFinite(Number(wm.opacity)) || Number(wm.opacity) < 0.05 || Number(wm.opacity) > 1)) {
+        err('BAD_WATERMARK_OPACITY', 'watermark.opacity must be in 0.05–1');
+      }
+      if (wm.size != null && (!Number.isFinite(Number(wm.size)) || Number(wm.size) < 8 || Number(wm.size) > 160)) {
+        err('BAD_WATERMARK_SIZE', 'watermark.size must be in 8–160');
+      }
+    }
+  }
 
   const seenIds = new Set();
   for (const def of TRACK_DEFS) {
@@ -1046,6 +1284,18 @@ export function validateTimeline(timeline) {
         }
         if (clip.text.strokeWidth != null && (!Number.isFinite(clip.text.strokeWidth) || clip.text.strokeWidth < 0 || clip.text.strokeWidth > 16)) {
           err('BAD_TEXT_STROKE', `Clip ${clip.id} text.strokeWidth out of range 0–16`);
+        }
+        if (clip.text.opacity != null && (!Number.isFinite(clip.text.opacity) || clip.text.opacity < 0.05 || clip.text.opacity > 1)) {
+          err('BAD_TEXT_OPACITY', `Clip ${clip.id} text.opacity out of range 0.05–1`);
+        }
+        if (clip.text.glowSize != null && (!Number.isFinite(clip.text.glowSize) || clip.text.glowSize < 0 || clip.text.glowSize > 40)) {
+          err('BAD_TEXT_GLOW', `Clip ${clip.id} text.glowSize out of range 0–40`);
+        }
+        if (clip.text.lineHeight != null && (!Number.isFinite(clip.text.lineHeight) || clip.text.lineHeight < 0.8 || clip.text.lineHeight > 2.4)) {
+          err('BAD_TEXT_LINE_HEIGHT', `Clip ${clip.id} text.lineHeight out of range 0.8–2.4`);
+        }
+        if (clip.text.rotate != null && (!Number.isFinite(clip.text.rotate) || clip.text.rotate < -360 || clip.text.rotate > 360)) {
+          err('BAD_TEXT_ROTATE', `Clip ${clip.id} text.rotate out of range -360–360`);
         }
       }
     }

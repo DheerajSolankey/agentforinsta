@@ -548,6 +548,35 @@ pre.code {
 .layout-btn { font-variant-numeric: tabular-nums; }
 .text-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 3; }
 
+/* Project brand watermark (FRAMEFLOW-style edge mark) */
+.watermark-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+.watermark-layer .wm-ov {
+  position: absolute;
+  line-height: 1;
+  font-weight: 700;
+  user-select: none;
+}
+/* Word-by-word stagger captions */
+.text-ov.text-stagger { white-space: normal; }
+.text-ov.text-stagger .stg-w {
+  display: inline-block;
+  opacity: 0;
+  animation: txt-stg-in 0.28s ease-out both;
+  will-change: opacity, transform;
+}
+.text-ov.text-stagger .stg-w.shown { opacity: 1; animation: none; }
+.text-ov.text-stagger .stg-w.active {
+  opacity: 1;
+  animation: none;
+  color: #ffe600;
+  text-shadow: 0 0 10px rgba(255,230,0,.65), 0 2px 4px rgba(0,0,0,.8);
+}
+@keyframes txt-stg-in {
+  0% { opacity: 0; transform: translateY(0.35em) scale(0.92); }
+  70% { opacity: 1; transform: translateY(-0.04em) scale(1.03); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 /* Floating v2/v3 overlay media (renderer parity) */
 .overlay-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 2; }
 .overlay-media {
@@ -612,6 +641,16 @@ pre.code {
   80% { opacity: 0.4; }
   88% { opacity: 1; }
   100% { opacity: 1; }
+}
+@keyframes txt-glitch {
+  0% { opacity: 0; transform: translate(-50%,-50%) translate(-6px, 2px) skewX(8deg); }
+  12% { opacity: 1; transform: translate(-50%,-50%) translate(5px, -2px) skewX(-6deg); }
+  24% { opacity: 0.3; transform: translate(-50%,-50%) translate(-4px, 3px); }
+  36% { opacity: 1; transform: translate(-50%,-50%) translate(3px, -1px) skewX(4deg); }
+  48% { opacity: 0.5; transform: translate(-50%,-50%) translate(-2px, 1px); }
+  60% { opacity: 1; transform: translate(-50%,-50%) translate(1px, -1px) skewX(-2deg); }
+  76% { opacity: 0.85; transform: translate(-50%,-50%) translate(-1px, 0); }
+  100% { opacity: 1; transform: translate(-50%,-50%); }
 }
 /* Cinematic vignette layer over preview media (matches FFmpeg vignette). */
 .preview-frame .vignette-layer {

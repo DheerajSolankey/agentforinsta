@@ -398,7 +398,7 @@ test('effects: normalize, setClipProps, validate', () => {
 });
 
 test('text premium: presets, anim/align normalize, banner sizing', () => {
-  assert.deepEqual(TEXT_ANIMS, ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in', 'flicker']);
+  assert.deepEqual(TEXT_ANIMS, ['none', 'fade', 'pop', 'slide-up', 'slide-down', 'bounce', 'zoom-in', 'flicker', 'glitch']);
   assert.ok(TEXT_ALIGNS.includes('center'));
   assert.ok(TEXT_PRESETS.meme.bgMode === 'full');
   assert.ok(TEXT_PRESETS.outline.strokeWidth > 0);
