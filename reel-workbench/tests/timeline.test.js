@@ -12,6 +12,11 @@ import {
   estimateBannerLines, bannerBoxHeight, snapPct,
   evalKeyframes, keyframeExpr, fadeGain, transitionGain, clampFade, normalizeKeyframes,
   TRANSITIONS, KEYFRAME_PROPS, MAX_FADE_SEC, EASE_MODES, applyEase,
+  SPEED_CURVE_PRESETS, SPEED_CURVE_PRESET_NAMES, SPEED_CURVE_CUSTOM, SPEED_CURVE_SEGMENTS,
+  MIN_SPEED_CURVE_POINTS, MAX_SPEED_CURVE_POINTS,
+  normalizeSpeedCurve, speedCurveOf, curveSpeedAt, speedCurveConstant, curveSegments,
+  sourceTimeAt, sourceSpanOf, normalizeReverse, normalizeChroma, normalizeMask,
+  MASK_TYPES, MASK_RANGES, DEFAULT_CHROMA, DEFAULT_MASK, CHROMA_KEYS,
 } from '../shared/timeline-ops.js';
 
 function tl() {
@@ -598,4 +603,247 @@ test('fades, transitions, keyframes: setClipProps + validate + eval', () => {
   assert.ok(KEYFRAME_PROPS.includes('opacity'));
   assert.equal(clampFade(-1), 0);
   assert.equal(clampFade(100), MAX_FADE_SEC);
+});
+
+const SLOMO = SPEED_CURVE_PRESETS.sloMo;
+
+test('speed curve: presets, normalization, evaluation', () => {
+  assert.deepEqual(SPEED_CURVE_PRESET_NAMES, ['constant', 'fastStart', 'fastEnd', 'flashIn', 'sloMo', 'montage', 'hero']);
+  assert.equal(SPEED_CURVE_CUSTOM, 'custom');
+  assert.equal(MIN_SPEED_CURVE_POINTS, 2);
+  assert.equal(MAX_SPEED_CURVE_POINTS, 32);
+  assert.equal(SPEED_CURVE_SEGMENTS, 12);
+
+  for (const name of SPEED_CURVE_PRESET_NAMES) {
+    const c = normalizeSpeedCurve({ preset: name, points: SPEED_CURVE_PRESETS[name] });
+    assert.ok(c, name);
+    assert.equal(c.preset, name);
+    assert.equal(c.points[0].t, 0, `${name} starts at 0`);
+    assert.equal(c.points[c.points.length - 1].t, 1, `${name} ends at 1`);
+    for (const p of c.points) assert.ok(p.v >= MIN_SPEED && p.v <= MAX_SPEED, `${name}: ${p.v}`);
+    assert.ok(speedCurveOf({ speedCurve: { preset: name, points: SPEED_CURVE_PRESETS[name] } }), name);
+  }
+  assert.ok(SLOMO.length >= 2);
+
+  // invalid shapes → null (caller throws)
+  assert.equal(normalizeSpeedCurve(null), null);
+  assert.equal(normalizeSpeedCurve('x'), null);
+  assert.equal(normalizeSpeedCurve({ points: [{ t: 0, v: 1 }] }), null);
+  assert.equal(normalizeSpeedCurve({ points: [{ t: 0, v: 'x' }, { t: 1, v: 1 }] }), null);
+  assert.equal(normalizeSpeedCurve({ points: [{ t: -1, v: 1 }, { t: 1, v: 1 }] }), null);
+
+  // out-of-range values clamp, out-of-order points sort, preset defaults to custom
+  assert.deepEqual(normalizeSpeedCurve({ points: [{ t: 1, v: 10 }, { t: 0, v: 0.01 }] }),
+    { preset: SPEED_CURVE_CUSTOM, points: [{ t: 0, v: MIN_SPEED }, { t: 1, v: MAX_SPEED }] });
+
+  // evaluation
+  assert.equal(curveSpeedAt({ preset: 'sloMo', points: SLOMO }, 0), 1);
+  assert.equal(curveSpeedAt({ preset: 'sloMo', points: SLOMO }, 0.5), 0.35);
+  assert.equal(curveSpeedAt({ preset: 'sloMo', points: SLOMO }, 1), 1);
+  assert.equal(curveSpeedAt({ preset: 'sloMo', points: SLOMO }, -1), 1);
+  assert.equal(curveSpeedAt({ preset: 'sloMo', points: SLOMO }, 9), 1);
+  assert.equal(curveSpeedAt(null, 0.5), 1);
+  assert.equal(curveSpeedAt({ points: [{ t: 0, v: 2 }, { t: 1, v: 2 }] }, 0.4), 2);
+
+  // constant degradation: flat curve → speed, shaped curve → null
+  assert.equal(speedCurveConstant({ points: [{ t: 0, v: 2 }, { t: 1, v: 2 }] }), 2);
+  assert.equal(speedCurveConstant({ preset: 'sloMo', points: SLOMO }), null);
+  assert.equal(speedCurveConstant(null), null);
+});
+
+test('speed curve: sourceTimeAt, sourceSpanOf, curveSegments (forward + reverse)', () => {
+  const flat = makeClip({ kind: 'video', duration: 3, srcIn: 1, speed: 2 });
+  assert.equal(sourceTimeAt(flat, 0), 1);
+  assert.equal(sourceTimeAt(flat, 3), 7); // srcIn + t * speed
+  assert.equal(sourceSpanOf(flat), 6);
+  const rev = makeClip({ kind: 'video', duration: 3, srcIn: 1, speed: 2, reverse: true });
+  assert.equal(sourceTimeAt(rev, 0), 7);
+  assert.equal(sourceTimeAt(rev, 3), 1);
+
+  const curve = makeClip({ kind: 'video', duration: 3, srcIn: 1, speedCurve: { preset: 'sloMo', points: SLOMO } });
+  assert.equal(sourceTimeAt(curve, 0), 1);
+  assert.equal(round3(sourceTimeAt(curve, 3)), 2.635); // srcIn + span
+  assert.equal(round3(sourceSpanOf(curve)), 1.635);
+  const rcurve = { ...curve, reverse: true };
+  assert.equal(round3(sourceTimeAt(rcurve, 0)), 2.635);
+  assert.equal(sourceTimeAt(rcurve, 3), 1);
+
+  // absolute source windows, contiguous, and retimed durations sum to the clip duration
+  const segs = curveSegments(curve, 12);
+  assert.equal(segs.length, 12);
+  assert.equal(segs[0].sa, 1); // srcIn
+  assert.equal(round3(segs[segs.length - 1].sb), 2.635); // srcIn + span
+  for (let i = 1; i < segs.length; i++) assert.equal(segs[i].sa, segs[i - 1].sb);
+  const total = segs.reduce((a, s) => a + (s.sb - s.sa) / s.speed, 0);
+  assert.ok(Math.abs(total - 3) < 1e-3, `retimed sum ${total}`);
+  assert.equal(curveSegments(curve, 1).length, 1);
+
+  // constant-speed clips do not need segments
+  assert.equal(sourceSpanOf(makeClip({ kind: 'video', duration: 2, speed: 1 })), 2);
+});
+
+test('speed curve / reverse / chroma / mask: makeClip + setClipProps', () => {
+  const t = tl();
+  const c = addClip(t, 'v1', {
+    kind: 'video', assetId: 'media-0001', start: 0, duration: 4, srcIn: 0, volume: 1,
+    speedCurve: { preset: 'sloMo', points: SLOMO },
+    reverse: true,
+    chroma: { similarity: 0.4 },
+    mask: { type: 'circle', feather: 0.5 },
+  });
+  assert.equal(c.speedCurve.preset, 'sloMo');
+  assert.equal(c.reverse, true);
+  assert.equal(c.chroma.similarity, 0.4);
+  assert.equal(c.mask.type, 'circle');
+  assert.equal(validateTimeline(t).length, 0);
+
+  // undefined = leave alone, null = clear
+  setClipProps(t, 'v1', c.id, { speed: undefined, volume: 0.5 });
+  let got = getClip(t, 'v1', c.id).clip;
+  assert.equal(got.speed, 1);
+  assert.equal(got.volume, 0.5);
+  setClipProps(t, 'v1', c.id, { speedCurve: null, reverse: null, chroma: null, mask: null });
+  got = getClip(t, 'v1', c.id).clip;
+  assert.equal(got.speedCurve, undefined);
+  assert.equal(got.reverse, undefined);
+  assert.equal(got.chroma, undefined);
+  assert.equal(got.mask, undefined);
+  assert.equal(validateTimeline(t).length, 0);
+
+  // bad shapes throw with their own codes
+  assert.throws(() => setClipProps(t, 'v1', c.id, { speedCurve: { points: [{ t: 0, v: 1 }] } }),
+    (e) => e.code === 'BAD_SPEED_CURVE');
+  assert.throws(() => setClipProps(t, 'v1', c.id, { reverse: 'x' }), (e) => e.code === 'BAD_REVERSE');
+  assert.throws(() => setClipProps(t, 'v1', c.id, { chroma: 'green' }), (e) => e.code === 'BAD_CHROMA');
+  assert.throws(() => setClipProps(t, 'v1', c.id, { mask: 7 }), (e) => e.code === 'BAD_MASK');
+
+  // out-of-range values are repaired instead of stored broken
+  setClipProps(t, 'v1', c.id, { chroma: { color: 'red', similarity: 9 }, mask: { type: 'square', w: 0 } });
+  got = getClip(t, 'v1', c.id).clip;
+  assert.equal(got.chroma.color, DEFAULT_CHROMA.color);
+  assert.equal(got.chroma.similarity, 1);
+  assert.equal(got.mask.type, 'ellipse');
+  assert.equal(got.mask.w, 1);
+  assert.equal(validateTimeline(t).length, 0);
+
+  // normalizers
+  assert.equal(normalizeReverse(true), true);
+  assert.equal(normalizeReverse('x'), false);
+  assert.equal(normalizeChroma(null), null);
+  assert.equal(normalizeMask(null), null);
+  assert.deepEqual(MASK_TYPES, ['rect', 'ellipse', 'circle', 'line']);
+  assert.deepEqual(MASK_RANGES.feather, [0, 1]);
+  assert.ok(CHROMA_KEYS.includes('similarity'));
+  assert.deepEqual(normalizeMask(DEFAULT_MASK), DEFAULT_MASK);
+
+  // kind gating: text clips reject all four props
+  const tt = tl();
+  const tx = addClip(tt, 't1', { kind: 'text', start: 0, duration: 1, text: { content: 'x' } });
+  for (const props of [
+    { chroma: { color: '#00ff00' } }, { mask: { type: 'rect' } },
+    { speedCurve: { points: SPEED_CURVE_PRESETS.constant } }, { reverse: true },
+  ]) {
+    assert.throws(() => setClipProps(tt, 't1', tx.id, props), (e) => e.code === 'BAD_PROP');
+  }
+});
+
+test('validateTimeline rejects bad speed curve / reverse / chroma / mask', () => {
+  const base = () => {
+    const t = tl();
+    addClip(t, 'v1', {
+      kind: 'video', assetId: 'media-0001', start: 0, duration: 2, srcIn: 0, volume: 1,
+      speedCurve: { preset: 'sloMo', points: SLOMO },
+      reverse: true,
+      chroma: { color: '#00ff00', similarity: 0.3, blend: 0.15, despill: 0 },
+      mask: { type: 'rect', x: 50, y: 50, w: 60, h: 60, feather: 0.5, rotation: 0, invert: false },
+    });
+    return t;
+  };
+  const codes = (mutate) => {
+    const t = base();
+    mutate(t.tracks.find((x) => x.id === 'v1').clips[0]);
+    return validateTimeline(t).map((i) => i.code);
+  };
+
+  assert.ok(codes((c) => { c.speedCurve = { preset: 'nope', points: SPEED_CURVE_PRESETS.constant }; })
+    .includes('BAD_SPEED_CURVE'));
+  assert.ok(codes((c) => { c.speedCurve = { preset: SPEED_CURVE_CUSTOM, points: [{ t: 0, v: 1 }] }; })
+    .includes('BAD_SPEED_CURVE'));
+  assert.ok(codes((c) => { c.speedCurve = { preset: SPEED_CURVE_CUSTOM, points: [{ t: 0, v: 1 }, { t: 0, v: 1 }] }; })
+    .includes('BAD_SPEED_CURVE_POINT'));
+  assert.ok(codes((c) => { c.speedCurve = { preset: SPEED_CURVE_CUSTOM, points: [{ t: 0, v: 99 }, { t: 1, v: 1 }] }; })
+    .includes('BAD_SPEED_CURVE_POINT'));
+  assert.ok(codes((c) => { c.reverse = 1; }).includes('BAD_REVERSE'));
+  assert.ok(codes((c) => { c.chroma = { color: 'red' }; }).includes('BAD_CHROMA'));
+  assert.ok(codes((c) => { c.chroma = { similarity: 5 }; }).includes('BAD_CHROMA'));
+  assert.ok(codes((c) => { c.mask = { type: 'square' }; }).includes('BAD_MASK'));
+  assert.ok(codes((c) => { c.mask.feather = 2; }).includes('BAD_MASK'));
+  assert.ok(codes((c) => { c.mask = { ...c.mask, bogus: 1 }; }).includes('BAD_MASK'));
+
+  // kind mismatch: text clips cannot carry chroma/mask/speedCurve/reverse
+  const t = base();
+  addClip(t, 't1', { kind: 'text', start: 0, duration: 1, text: { content: 'x' } });
+  const tx = t.tracks.find((x) => x.id === 't1').clips[0];
+  tx.chroma = { color: '#00ff00', similarity: 0.3, blend: 0, despill: 0 };
+  assert.ok(validateTimeline(t).some((i) => i.code === 'BAD_CHROMA'));
+});
+
+test('splitClip remaps speed curves and keeps source coverage', () => {
+  const t = tl();
+  const c = addClip(t, 'v1', {
+    kind: 'video', assetId: 'media-0001', start: 0, duration: 4, srcIn: 0, volume: 1,
+    speedCurve: { preset: 'sloMo', points: SLOMO },
+  });
+  assert.equal(round3(sourceSpanOf(c)), 2.18);
+  const { left, right } = splitClip(t, 'v1', c.id, 1.5);
+  assert.equal(left.duration, 1.5);
+  assert.equal(right.duration, 2.5);
+  assert.equal(left.srcIn, 0);
+  assert.equal(round3(right.srcIn), 0.915); // sourceTimeAt at the cut
+  assert.equal(right.speedCurve.preset, SPEED_CURVE_CUSTOM);
+  assert.equal(left.speedCurve.preset, SPEED_CURVE_CUSTOM);
+  assert.equal(right.speedCurve.points[0].t, 0);
+  assert.equal(right.speedCurve.points[right.speedCurve.points.length - 1].t, 1);
+  assert.equal(right.speedCurve.points[0].v, 0.35); // cut speed pinned on both sides
+  assert.equal(left.speedCurve.points[left.speedCurve.points.length - 1].v, 0.35);
+  assert.ok(Math.abs(sourceSpanOf(left) + sourceSpanOf(right) - sourceSpanOf(c)) < 1e-6);
+  assert.equal(validateTimeline(t).length, 0);
+});
+
+test('splitClip on a reversed clip walks the source backwards', () => {
+  const plain = tl();
+  const pc = addClip(plain, 'v1', { kind: 'video', assetId: 'media-0001', start: 0, duration: 4, srcIn: 1, volume: 1, reverse: true });
+  const ps = splitClip(plain, 'v1', pc.id, 1.5);
+  assert.equal(ps.right.srcIn, 1); // right keeps the window start
+  assert.equal(ps.left.srcIn, 3.5); // srcIn + consumed by the right piece
+
+  const t = tl();
+  const c = addClip(t, 'v1', {
+    kind: 'video', assetId: 'media-0001', start: 0, duration: 4, srcIn: 1, volume: 1, reverse: true,
+    speedCurve: { preset: 'sloMo', points: SLOMO },
+  });
+  const span = sourceSpanOf(c);
+  const { left, right } = splitClip(t, 'v1', c.id, 1.5);
+  assert.equal(right.srcIn, 1);
+  assert.equal(round3(left.srcIn), round3(1 + sourceSpanOf(right)));
+  assert.ok(Math.abs(sourceSpanOf(left) + sourceSpanOf(right) - span) < 1e-6);
+  assert.equal(right.speedCurve.preset, SPEED_CURVE_CUSTOM);
+  assert.equal(validateTimeline(t).length, 0);
+});
+
+test('trimClip source overrun accounts for a speed curve', () => {
+  const t = tl();
+  const c = addClip(t, 'v1', {
+    kind: 'video', assetId: 'media-0001', start: 0, duration: 1, srcIn: 0, volume: 1,
+    speedCurve: { preset: 'sloMo', points: SLOMO },
+  });
+  // 3 timeline seconds of this curve consume 1.635 s of source
+  assert.equal(round3(sourceSpanOf({ ...c, duration: 3 })), 1.635);
+  assert.throws(() => trimClip(t, 'v1', c.id, { duration: 3, srcIn: 0 }, 1.5),
+    (e) => e.code === 'SOURCE_OVERRUN');
+  trimClip(t, 'v1', c.id, { duration: 3, srcIn: 0 }, 2);
+  const got = getClip(t, 'v1', c.id).clip;
+  assert.equal(got.duration, 3);
+  assert.equal(round3(sourceSpanOf(got)), 1.635);
+  assert.equal(validateTimeline(t).length, 0);
 });

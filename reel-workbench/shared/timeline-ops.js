@@ -22,10 +22,47 @@ export const TEXT_FONTS = [
   'Rockwell', 'Calibri', 'Cambria', 'Consolas', 'MS Gothic',
 ];
 export const TRANSITIONS = ['none', 'fade', 'dip', 'flash', 'zoom', 'slide'];
-export const KEYFRAME_PROPS = ['scale', 'posX', 'posY', 'rotate', 'opacity', 'volume'];
+/** Transform + audio + grade properties that can be keyframed on a clip. */
+export const KEYFRAME_PROPS = ['scale', 'posX', 'posY', 'rotate', 'opacity', 'volume', 'exposure', 'contrast', 'saturation', 'temperature'];
+/** Subset of KEYFRAME_PROPS that animate the color grade (video/image only). */
+export const GRADE_KEYFRAME_PROPS = ['exposure', 'contrast', 'saturation', 'temperature'];
 /** Per-keyframe segment curves (applies from a point to the next). Default linear. */
 export const EASE_MODES = ['linear', 'in', 'out', 'ease'];
 export const MAX_FADE_SEC = 10;
+
+/* ------------------------------ color grade ----------------------------- */
+/** Per-clip grading controls (-1..1 sliders except vignette 0..1). */
+export const GRADE_KEYS = ['exposure', 'contrast', 'saturation', 'temperature', 'vignette'];
+export const GRADE_RANGES = {
+  exposure: [-1, 1],
+  contrast: [-1, 1],
+  saturation: [-1, 1],
+  temperature: [-1, 1],
+  vignette: [0, 1],
+};
+export const DEFAULT_GRADE = { exposure: 0, contrast: 0, saturation: 0, temperature: 0, vignette: 0 };
+export const GRADE_LABELS = {
+  exposure: 'Exposure',
+  contrast: 'Contrast',
+  saturation: 'Saturation',
+  temperature: 'Temperature',
+  vignette: 'Vignette',
+};
+/** One-click looks (values are deltas from neutral). */
+export const GRADE_PRESETS = {
+  neutral: {},
+  cinema: { exposure: 0.02, contrast: 0.18, saturation: 0.06, temperature: -0.18, vignette: 0.28 },
+  golden: { exposure: 0.06, contrast: 0.12, saturation: 0.18, temperature: 0.6, vignette: 0.22 },
+  cool: { contrast: 0.14, saturation: -0.04, temperature: -0.4, vignette: 0.18 },
+  punchy: { exposure: 0.04, contrast: 0.32, saturation: 0.3, temperature: 0.04, vignette: 0.12 },
+  matte: { exposure: 0.1, contrast: -0.22, saturation: -0.08, temperature: 0.18, vignette: 0.3 },
+  moody: { exposure: -0.14, contrast: 0.22, saturation: -0.16, temperature: -0.12, vignette: 0.5 },
+};
+
+/** Transition length in seconds (cut → full frame). */
+export const MIN_TRANSITION = 0.05;
+export const MAX_TRANSITION = 2;
+export const DEFAULT_TRANSITION = 0.3;
 
 /** Project-wide brand watermark positions (burned into export + preview). */
 export const WATERMARK_POSITIONS = [
@@ -383,6 +420,277 @@ export function normalizeTransition(t) {
   return TRANSITIONS.includes(t) ? t : 'none';
 }
 
+/** Clamp a transition length (seconds). */
+export function normalizeTransitionDur(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DEFAULT_TRANSITION;
+  return round3(Math.min(MAX_TRANSITION, Math.max(MIN_TRANSITION, v)));
+}
+
+/** Clamp every grade channel into its range (missing keys fall back to neutral). */
+export function normalizeGrade(g) {
+  const out = { ...DEFAULT_GRADE };
+  if (!g || typeof g !== 'object') return out;
+  for (const key of GRADE_KEYS) {
+    const [lo, hi] = GRADE_RANGES[key];
+    const v = Number(g[key]);
+    if (!Number.isFinite(v)) continue;
+    out[key] = round3(Math.min(hi, Math.max(lo, v)));
+  }
+  return out;
+}
+
+/** True when every channel is neutral (no grade to store/render). */
+export function isDefaultGrade(g) {
+  const n = normalizeGrade(g);
+  return GRADE_KEYS.every((k) => Math.abs(n[k]) < 1e-6);
+}
+
+/** Effective grade for a clip (never null). */
+export function gradeOf(clip) {
+  return normalizeGrade(clip?.grade);
+}
+
+/* ------------------------------ speed curve ----------------------------- */
+/**
+ * One-click speed ramps: normalized clip time `t` (0–1) → playback speed `v`.
+ * Every preset starts at t=0, ends at t=1 and stays inside MIN_SPEED–MAX_SPEED.
+ * A clip carrying `speedCurve` ignores its constant `speed`.
+ */
+export const SPEED_CURVE_PRESETS = {
+  /** Flat 1× — same as no curve. */
+  constant: [{ t: 0, v: 1 }, { t: 1, v: 1 }],
+  /** Whip in: 3× → settle to 1×. */
+  fastStart: [{ t: 0, v: 3 }, { t: 0.35, v: 1.2 }, { t: 1, v: 1 }],
+  /** Build up: 1× → 3× finish. */
+  fastEnd: [{ t: 0, v: 1 }, { t: 0.65, v: 1.3 }, { t: 1, v: 3 }],
+  /** Flash sprint: 4× → 1× almost immediately. */
+  flashIn: [{ t: 0, v: 4 }, { t: 0.15, v: 1.6 }, { t: 1, v: 1 }],
+  /** Slow-motion punch in the middle, normal at both ends. */
+  sloMo: [{ t: 0, v: 1 }, { t: 0.3, v: 0.35 }, { t: 0.7, v: 0.35 }, { t: 1, v: 1 }],
+  /** Rhythmic fast/slow pumping for montage cuts. */
+  montage: [
+    { t: 0, v: 2.2 }, { t: 0.25, v: 1 }, { t: 0.5, v: 2.2 },
+    { t: 0.75, v: 1 }, { t: 1, v: 2.2 },
+  ],
+  /** Hero hold: 0.5× slow play, then accelerate out to 2.5×. */
+  hero: [{ t: 0, v: 0.5 }, { t: 0.55, v: 0.5 }, { t: 1, v: 2.5 }],
+};
+export const SPEED_CURVE_PRESET_NAMES = Object.keys(SPEED_CURVE_PRESETS);
+/** Sentinel preset for hand-drawn ramps. */
+export const SPEED_CURVE_CUSTOM = 'custom';
+export const MIN_SPEED_CURVE_POINTS = 2;
+export const MAX_SPEED_CURVE_POINTS = 32;
+/** Source windows the exporter splits a curve into (fps may lower it for short clips). */
+export const SPEED_CURVE_SEGMENTS = 12;
+
+export function round6(n) {
+  return Math.round(n * 1e6) / 1e6;
+}
+
+/**
+ * Normalize `clip.speedCurve` → `{ preset, points }` sorted/deduped/rounded, or
+ * null when the value is missing or structurally invalid (bad shape, non-numeric
+ * point, too few/many points). Speeds clamp into MIN_SPEED–MAX_SPEED.
+ */
+export function normalizeSpeedCurve(v) {
+  if (v == null) return null;
+  if (typeof v !== 'object' || Array.isArray(v)) return null;
+  if (!Array.isArray(v.points)) return null;
+  if (v.points.length < MIN_SPEED_CURVE_POINTS || v.points.length > MAX_SPEED_CURVE_POINTS) return null;
+  const pts = [];
+  for (const p of v.points) {
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+    const t = Number(p.t);
+    const s = Number(p.v);
+    if (!Number.isFinite(t) || !Number.isFinite(s)) return null;
+    if (t < -EPS || t > 1 + EPS || s <= 0) return null;
+    pts.push({ t: round3(clamp(t, 0, 1)), v: round3(clamp(s, MIN_SPEED, MAX_SPEED)) });
+  }
+  pts.sort((a, b) => a.t - b.t);
+  const dedup = [];
+  for (const p of pts) {
+    if (dedup.length && Math.abs(dedup[dedup.length - 1].t - p.t) < EPS) dedup[dedup.length - 1] = p;
+    else dedup.push(p);
+  }
+  if (dedup.length < MIN_SPEED_CURVE_POINTS) return null;
+  const preset = SPEED_CURVE_PRESET_NAMES.includes(v.preset) || v.preset === SPEED_CURVE_CUSTOM
+    ? v.preset : SPEED_CURVE_CUSTOM;
+  return { preset, points: dedup };
+}
+
+/** Effective speed curve of a clip (null when off / invalid). */
+export function speedCurveOf(clip) {
+  return normalizeSpeedCurve(clip?.speedCurve);
+}
+
+/**
+ * Playback speed at normalized curve time u∈[0,1] (piecewise linear, clamped).
+ * Null curve → 1 (constant 1×). Exported for preview + tests.
+ */
+export function curveSpeedAt(curve, u) {
+  const c = normalizeSpeedCurve(curve);
+  if (!c) return 1;
+  const pts = c.points;
+  const x = clamp(Number.isFinite(Number(u)) ? Number(u) : 0, 0, 1);
+  if (x <= pts[0].t) return pts[0].v;
+  const last = pts[pts.length - 1];
+  if (x >= last.t) return last.v;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    if (x <= b.t) {
+      const span = b.t - a.t;
+      if (span <= EPS) return b.v;
+      return a.v + ((b.v - a.v) * (x - a.t)) / span;
+    }
+  }
+  return last.v;
+}
+
+/** Flat speed shared by every point of a curve, or null when the curve animates. */
+export function speedCurveConstant(curve) {
+  const c = normalizeSpeedCurve(curve);
+  if (!c) return null;
+  const v0 = c.points[0].v;
+  return c.points.every((p) => Math.abs(p.v - v0) < 1e-9) ? v0 : null;
+}
+
+/** Effective points over [0,1]: pinned to the ends so integration is well defined. */
+function curveBreakpoints(pts) {
+  const list = [{ t: 0, v: pts[0].v }];
+  for (const p of pts) if (p.t > 0 && p.t < 1) list.push(p);
+  list.push({ t: 1, v: pts[pts.length - 1].v });
+  return list;
+}
+
+/** ∫₀^u speed dx for a normalized curve (exact per linear piece). */
+function curveIntegral(curve, u) {
+  const x = clamp(Number.isFinite(Number(u)) ? Number(u) : 0, 0, 1);
+  const list = curveBreakpoints(curve.points);
+  let total = 0;
+  for (let i = 1; i < list.length; i++) {
+    const a = list[i - 1];
+    const b = list[i];
+    if (x <= a.t) break;
+    const hi = Math.min(x, b.t);
+    const span = b.t - a.t;
+    const vHi = a.v + ((b.v - a.v) * (hi - a.t)) / span;
+    total += ((hi - a.t) * (a.v + vHi)) / 2;
+    if (x <= b.t) break;
+  }
+  return total;
+}
+
+/**
+ * Source distance covered in the first `t` output seconds (0 ≤ t ≤ duration).
+ * Constant speed without a curve → t·speed (identical to the classic retime).
+ */
+function consumedOf(clip, t) {
+  const dur = Number(clip?.duration) || 0;
+  const x = clamp(Number.isFinite(Number(t)) ? Number(t) : 0, 0, dur);
+  const curve = speedCurveOf(clip);
+  if (curve) return (dur || 0) * curveIntegral(curve, dur ? x / dur : 0);
+  const sp = Number(clip?.speed);
+  return x * (Number.isFinite(sp) && sp > 0 ? sp : 1);
+}
+
+/**
+ * Source (asset) time shown at clip-local time `localT`.
+ * Folds in `srcIn`, the speed curve (or constant `speed`) and `reverse`
+ * (a reversed clip reads the window backwards: t=0 → source window end).
+ * Clamped to the clip window; µs precision.
+ */
+export function sourceTimeAt(clip, localT) {
+  const dur = Number(clip?.duration) || 0;
+  const srcIn = Number.isFinite(Number(clip?.srcIn)) ? Number(clip.srcIn) : 0;
+  const t = clamp(Number.isFinite(Number(localT)) ? Number(localT) : 0, 0, dur);
+  const back = normalizeReverse(clip?.reverse);
+  return round6(srcIn + consumedOf(clip, back ? dur - t : t));
+}
+
+/** Length of source media a clip consumes (independent of direction). */
+export function sourceSpanOf(clip) {
+  const dur = Number(clip?.duration) || 0;
+  if (!(dur > 0)) return 0;
+  return round6(Math.abs(sourceTimeAt(clip, dur) - sourceTimeAt(clip, 0)));
+}
+
+/**
+ * `n` source windows covering the clip from start to end (always forward /
+ * ascending in source time — direction is applied after the retiming stage).
+ * Boundaries are shared, so `segments[i].sb === segments[i+1].sa` and the last
+ * `sb` is the end of the source window. `speed` is the window's average speed.
+ */
+export function curveSegments(clip, n = SPEED_CURVE_SEGMENTS) {
+  const dur = Number(clip?.duration) || 0;
+  if (!(dur > 0)) return [];
+  const N = clamp(Math.round(Number(n) || SPEED_CURVE_SEGMENTS), 1, 64);
+  const srcIn = Number.isFinite(Number(clip?.srcIn)) ? Number(clip.srcIn) : 0;
+  const out = [];
+  for (let i = 0; i < N; i++) {
+    const a = (i * dur) / N;
+    const b = ((i + 1) * dur) / N;
+    const sa = round6(srcIn + consumedOf(clip, a));
+    const sb = round6(srcIn + consumedOf(clip, b));
+    out.push({ sa, sb, speed: round6((sb - sa) / (b - a)) });
+  }
+  return out;
+}
+
+/* -------------------------------- reverse -------------------------------- */
+
+/** Normalize `clip.reverse` (only video/audio can play backwards). */
+export function normalizeReverse(v) {
+  return v === true;
+}
+
+/* ------------------------------- chroma key ----------------------------- */
+/** Chroma-key (green/blue screen) defaults — enabled by storing the object. */
+export const DEFAULT_CHROMA = { color: '#00ff00', similarity: 0.3, blend: 0.15, despill: 0 };
+export const CHROMA_KEYS = ['color', 'similarity', 'blend', 'despill'];
+
+/** Normalize `clip.chroma` → object, or null when off/invalid. Values clamp 0–1. */
+export function normalizeChroma(c) {
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+  const out = { ...DEFAULT_CHROMA };
+  if (c.color != null) {
+    const h = hexOr(c.color, DEFAULT_CHROMA.color);
+    if (h) out.color = h;
+  }
+  for (const k of ['similarity', 'blend', 'despill']) {
+    const v = Number(c[k]);
+    if (Number.isFinite(v)) out[k] = round3(clamp(v, 0, 1));
+  }
+  return out;
+}
+
+/* --------------------------------- mask ---------------------------------- */
+/** Matte shapes (percentages of the clip frame, center-anchored). */
+export const MASK_TYPES = ['rect', 'ellipse', 'circle', 'line'];
+export const DEFAULT_MASK = { type: 'ellipse', x: 50, y: 50, w: 60, h: 60, feather: 0.15, rotation: 0, invert: false };
+/** Valid ranges per mask property (also used by validateTimeline). */
+export const MASK_RANGES = {
+  x: [-100, 200],
+  y: [-100, 200],
+  w: [1, 200],
+  h: [1, 200],
+  feather: [0, 1],
+  rotation: [-360, 360],
+};
+
+/** Normalize `clip.mask` → object, or null when off/invalid. */
+export function normalizeMask(m) {
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
+  const out = { type: MASK_TYPES.includes(m.type) ? m.type : DEFAULT_MASK.type };
+  for (const [k, [lo, hi]] of Object.entries(MASK_RANGES)) {
+    const v = Number(m[k]);
+    out[k] = round3(clamp(Number.isFinite(v) ? v : DEFAULT_MASK[k], lo, hi));
+  }
+  out.invert = !!m.invert;
+  return out;
+}
+
 export function normalizeKeyframes(kf) {
   if (!kf || typeof kf !== 'object') return {};
   const out = {};
@@ -502,7 +810,7 @@ export function fadeGain(clip, localT) {
 export function transitionGain(clip, localT) {
   const tr = normalizeTransition(clip?.transitionIn);
   if (tr === 'none') return 1;
-  const d = 0.3;
+  const d = normalizeTransitionDur(clip?.transitionDur);
   const t = Number(localT);
   if (!Number.isFinite(t) || t >= d) return 1;
   if (t < 0) return 0;
@@ -691,6 +999,12 @@ export function makeClip({
   fadeIn = 0,
   fadeOut = 0,
   transitionIn = 'none',
+  transitionDur = DEFAULT_TRANSITION,
+  grade = null,
+  speedCurve = null,
+  reverse = false,
+  chroma = null,
+  mask = null,
   keyframes = null,
 } = {}) {
   const clip = {
@@ -706,11 +1020,18 @@ export function makeClip({
     fadeOut: clampFade(fadeOut),
     transitionIn: normalizeTransition(transitionIn),
   };
+  const tdur = normalizeTransitionDur(transitionDur);
+  if (tdur !== DEFAULT_TRANSITION) clip.transitionDur = tdur;
   const kf = normalizeKeyframes(keyframes);
   if (Object.keys(kf).length) clip.keyframes = kf;
   if (kind !== 'text') clip.assetId = assetId;
   if (kind === 'text') {
     clip.text = normalizeText(text || {});
+  }
+  if (kind === 'video' || kind === 'audio') {
+    const sc = normalizeSpeedCurve(speedCurve);
+    if (sc) clip.speedCurve = sc;
+    if (normalizeReverse(reverse)) clip.reverse = true;
   }
   if (kind === 'image' || kind === 'video') {
     clip.overlay = normalizeOverlay(overlay || null, kind);
@@ -721,6 +1042,11 @@ export function makeClip({
     clip.posY = tr.posY;
     clip.rotate = tr.rotate;
     clip.effect = normalizeEffect(effect);
+    if (!isDefaultGrade(grade)) clip.grade = normalizeGrade(grade);
+    const ch = normalizeChroma(chroma);
+    if (ch) clip.chroma = ch;
+    const mk = normalizeMask(mask);
+    if (mk) clip.mask = mk;
   }
   return clip;
 }
@@ -908,14 +1234,23 @@ export function splitClip(timeline, trackId, clipId, at) {
   const rightDur = round3(end - at);
 
   const speed = clip.speed > 0 ? clip.speed : 1;
+  const back = normalizeReverse(clip.reverse);
+  const hasCurve = !!speedCurveOf(clip);
   const left = { ...deep(clip), duration: leftDur };
   const right = {
     ...deep(clip),
     id: uid('clip'),
     start: rightStart,
     duration: rightDur,
-    srcIn: round3(clip.srcIn + leftDur * speed),
+    // Forward: the right half starts where the left half stopped consuming source.
+    // Reverse: the window is read backwards, so the LEFT half owns the later source.
+    srcIn: back
+      ? clip.srcIn
+      : round3(clip.srcIn + (hasCurve ? consumedOf(clip, leftDur) : leftDur * speed)),
   };
+  if (back) {
+    left.srcIn = round3(clip.srcIn + (hasCurve ? consumedOf(clip, rightDur) : rightDur * speed));
+  }
   // Remap fades / transitions / keyframes for the two halves (local time from each start).
   left.fadeIn = clampFade(clip.fadeIn);
   left.fadeOut = clip.fadeOut != null ? Math.min(clampFade(clip.fadeOut), leftDur) : 0;
@@ -930,6 +1265,7 @@ export function splitClip(timeline, trackId, clipId, at) {
     if (Object.keys(remap.right).length) right.keyframes = remap.right;
     else delete right.keyframes;
   }
+  if (hasCurve) remapSpeedCurveSplit(clip, left, right, leftDur, rightDur);
   const idx = track.clips.indexOf(clip);
   track.clips.splice(idx, 1, left, right);
   sortClips(timeline);
@@ -948,8 +1284,9 @@ export function trimClip(timeline, trackId, clipId, { start, duration, srcIn } =
   assertFinitePositive('srcIn', newSrcIn, { allowZero: true });
   if (newDur < MIN_CLIP) throw new TimelineError('TOO_SHORT', `Clip duration must be >= ${MIN_CLIP}s`);
   if (clip.kind !== 'text' && assetDuration != null) {
-    const sp = clip.speed > 0 ? clip.speed : 1;
-    if (newSrcIn + newDur * sp > assetDuration + EPS) {
+    // Curve-aware: a speed curve replaces the constant speed for source mapping.
+    const span = consumedOf({ ...clip, duration: newDur }, newDur);
+    if (newSrcIn + span > assetDuration + EPS) {
       throw new TimelineError('SOURCE_OVERRUN', 'Trim exceeds source media duration');
     }
   }
@@ -1003,10 +1340,11 @@ export function duplicateClip(timeline, trackId, clipId, newStart = null) {
   return copy;
 }
 
-const CLIP_PROP_KEYS = [
+export const CLIP_PROP_KEYS = [
   'volume', 'muted', 'start', 'duration', 'srcIn', 'overlay', 'speed',
-  'fit', 'scale', 'posX', 'posY', 'rotate', 'effect',
-  'fadeIn', 'fadeOut', 'transitionIn', 'keyframes',
+  'fit', 'scale', 'posX', 'posY', 'rotate', 'effect', 'grade',
+  'fadeIn', 'fadeOut', 'transitionIn', 'transitionDur', 'keyframes',
+  'speedCurve', 'reverse', 'chroma', 'mask',
 ];
 
 export function setClipProps(timeline, trackId, clipId, props = {}) {
@@ -1061,6 +1399,63 @@ export function setClipProps(timeline, trackId, clipId, props = {}) {
     }
     clip.effect = normalizeEffect(rest.effect);
   }
+  if (rest.grade != null) {
+    if (clip.kind !== 'video' && clip.kind !== 'image') {
+      throw new TimelineError('BAD_PROP', 'grade only applies to video/image clips');
+    }
+    if (typeof rest.grade !== 'object' || Array.isArray(rest.grade)) {
+      throw new TimelineError('BAD_GRADE', 'grade must be an object of numeric channels');
+    }
+    const next = normalizeGrade({ ...clip.grade, ...rest.grade });
+    if (isDefaultGrade(next)) delete clip.grade;
+    else clip.grade = next;
+  }
+  // New-style props: `undefined` = leave alone, `null` = clear.
+  if (rest.speedCurve !== undefined) {
+    if (clip.kind !== 'video' && clip.kind !== 'audio') {
+      throw new TimelineError('BAD_PROP', 'speedCurve only applies to video/audio clips');
+    }
+    if (rest.speedCurve === null) delete clip.speedCurve;
+    else {
+      const sc = normalizeSpeedCurve(rest.speedCurve);
+      if (!sc) {
+        throw new TimelineError('BAD_SPEED_CURVE', `speedCurve must be an object with ${MIN_SPEED_CURVE_POINTS}–${MAX_SPEED_CURVE_POINTS} numeric {t,v} points`);
+      }
+      clip.speedCurve = sc;
+    }
+  }
+  if (rest.reverse !== undefined) {
+    if (clip.kind !== 'video' && clip.kind !== 'audio') {
+      throw new TimelineError('BAD_PROP', 'reverse only applies to video/audio clips');
+    }
+    if (rest.reverse !== null && typeof rest.reverse !== 'boolean') {
+      throw new TimelineError('BAD_REVERSE', 'reverse must be a boolean');
+    }
+    if (normalizeReverse(rest.reverse)) clip.reverse = true;
+    else delete clip.reverse;
+  }
+  if (rest.chroma !== undefined) {
+    if (clip.kind !== 'video' && clip.kind !== 'image') {
+      throw new TimelineError('BAD_PROP', 'chroma only applies to video/image clips');
+    }
+    if (rest.chroma === null) delete clip.chroma;
+    else {
+      const ch = normalizeChroma(rest.chroma);
+      if (!ch) throw new TimelineError('BAD_CHROMA', 'chroma must be an object of color/similarity/blend/despill');
+      clip.chroma = ch;
+    }
+  }
+  if (rest.mask !== undefined) {
+    if (clip.kind !== 'video' && clip.kind !== 'image') {
+      throw new TimelineError('BAD_PROP', 'mask only applies to video/image clips');
+    }
+    if (rest.mask === null) delete clip.mask;
+    else {
+      const mk = normalizeMask(rest.mask);
+      if (!mk) throw new TimelineError('BAD_MASK', `mask must be an object with type: ${MASK_TYPES.join(', ')}`);
+      clip.mask = mk;
+    }
+  }
   if (rest.fadeIn != null) clip.fadeIn = clampFade(rest.fadeIn);
   if (rest.fadeOut != null) clip.fadeOut = clampFade(rest.fadeOut);
   if (rest.transitionIn != null) {
@@ -1068,6 +1463,11 @@ export function setClipProps(timeline, trackId, clipId, props = {}) {
       throw new TimelineError('BAD_TRANSITION', `transitionIn must be one of: ${TRANSITIONS.join(', ')}`);
     }
     clip.transitionIn = normalizeTransition(rest.transitionIn);
+  }
+  if (rest.transitionDur != null) {
+    const td = normalizeTransitionDur(rest.transitionDur);
+    if (td === DEFAULT_TRANSITION) delete clip.transitionDur;
+    else clip.transitionDur = td;
   }
   if (rest.keyframes != null) {
     const kf = normalizeKeyframes(rest.keyframes);
@@ -1227,6 +1627,129 @@ export function validateTimeline(timeline) {
       if (clip.transitionIn != null && !TRANSITIONS.includes(clip.transitionIn)) {
         err('BAD_TRANSITION', `Clip ${clip.id} transitionIn must be one of: ${TRANSITIONS.join(', ')}`);
       }
+      if (clip.transitionDur != null) {
+        const td = Number(clip.transitionDur);
+        if (!Number.isFinite(td) || td < MIN_TRANSITION - EPS || td > MAX_TRANSITION + EPS) {
+          err('BAD_TRANSITION_DUR', `Clip ${clip.id} transitionDur must be in ${MIN_TRANSITION}–${MAX_TRANSITION}s`);
+        }
+      }
+      if (clip.grade != null) {
+        if (typeof clip.grade !== 'object' || Array.isArray(clip.grade)) {
+          err('BAD_GRADE', `Clip ${clip.id} grade must be an object`);
+        } else if (clip.kind !== 'video' && clip.kind !== 'image') {
+          err('BAD_GRADE', `Clip ${clip.id} grade only applies to video/image clips`);
+        } else {
+          for (const [gk, gv] of Object.entries(clip.grade)) {
+            if (!GRADE_KEYS.includes(gk)) {
+              err('BAD_GRADE_KEY', `Clip ${clip.id} grade key must be one of: ${GRADE_KEYS.join(', ')}`);
+              continue;
+            }
+            const [lo, hi] = GRADE_RANGES[gk];
+            const v = Number(gv);
+            if (!Number.isFinite(v) || v < lo - EPS || v > hi + EPS) {
+              err('BAD_GRADE', `Clip ${clip.id} grade.${gk} must be in ${lo}–${hi}`);
+            }
+          }
+        }
+      }
+      if (clip.speedCurve != null) {
+        if (clip.kind !== 'video' && clip.kind !== 'audio') {
+          err('BAD_SPEED_CURVE', `Clip ${clip.id} speedCurve only applies to video/audio clips`);
+        } else if (typeof clip.speedCurve !== 'object' || Array.isArray(clip.speedCurve)) {
+          err('BAD_SPEED_CURVE', `Clip ${clip.id} speedCurve must be an object with points`);
+        } else {
+          const sc = clip.speedCurve;
+          if (sc.preset != null && typeof sc.preset !== 'string') {
+            err('BAD_SPEED_CURVE', `Clip ${clip.id} speedCurve.preset must be a string`);
+          } else if (sc.preset != null && !SPEED_CURVE_PRESET_NAMES.includes(sc.preset) && sc.preset !== SPEED_CURVE_CUSTOM) {
+            err('BAD_SPEED_CURVE', `Clip ${clip.id} speedCurve.preset must be one of: ${SPEED_CURVE_PRESET_NAMES.join(', ')}, ${SPEED_CURVE_CUSTOM}`);
+          }
+          const pts = sc.points;
+          if (!Array.isArray(pts)) {
+            err('BAD_SPEED_CURVE', `Clip ${clip.id} speedCurve.points must be an array`);
+          } else if (pts.length < MIN_SPEED_CURVE_POINTS || pts.length > MAX_SPEED_CURVE_POINTS) {
+            err('BAD_SPEED_CURVE', `Clip ${clip.id} speedCurve.points must have ${MIN_SPEED_CURVE_POINTS}–${MAX_SPEED_CURVE_POINTS} points`);
+          } else {
+            let prevT = -Infinity;
+            for (const p of pts) {
+              if (!p || typeof p !== 'object' || Array.isArray(p)) {
+                err('BAD_SPEED_CURVE_POINT', `Clip ${clip.id} speedCurve point must be an object {t,v}`);
+                break;
+              }
+              const t = Number(p.t);
+              const v = Number(p.v);
+              if (!Number.isFinite(t) || t < -EPS || t > 1 + EPS) {
+                err('BAD_SPEED_CURVE_POINT', `Clip ${clip.id} speedCurve point t must be in 0–1`);
+                break;
+              }
+              if (typeof p.v !== 'number' || !Number.isFinite(v) || v < MIN_SPEED - EPS || v > MAX_SPEED + EPS) {
+                err('BAD_SPEED_CURVE_POINT', `Clip ${clip.id} speedCurve point v must be a number in ${MIN_SPEED}–${MAX_SPEED}`);
+                break;
+              }
+              if (t <= prevT + EPS) {
+                err('BAD_SPEED_CURVE_POINT', `Clip ${clip.id} speedCurve points must be strictly increasing in t`);
+                break;
+              }
+              prevT = t;
+            }
+          }
+        }
+      }
+      if (clip.reverse != null) {
+        if (clip.kind !== 'video' && clip.kind !== 'audio') {
+          err('BAD_REVERSE', `Clip ${clip.id} reverse only applies to video/audio clips`);
+        } else if (typeof clip.reverse !== 'boolean') {
+          err('BAD_REVERSE', `Clip ${clip.id} reverse must be a boolean`);
+        }
+      }
+      if (clip.chroma != null) {
+        if (clip.kind !== 'video' && clip.kind !== 'image') {
+          err('BAD_CHROMA', `Clip ${clip.id} chroma only applies to video/image clips`);
+        } else if (typeof clip.chroma !== 'object' || Array.isArray(clip.chroma)) {
+          err('BAD_CHROMA', `Clip ${clip.id} chroma must be an object`);
+        } else {
+          for (const [ck, cv] of Object.entries(clip.chroma)) {
+            if (!CHROMA_KEYS.includes(ck)) {
+              err('BAD_CHROMA', `Clip ${clip.id} chroma key must be one of: ${CHROMA_KEYS.join(', ')}`);
+              continue;
+            }
+            if (ck === 'color') {
+              if (typeof cv !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(cv)) {
+                err('BAD_CHROMA', `Clip ${clip.id} chroma.color must be #rrggbb`);
+              }
+            } else if (typeof cv !== 'number' || !Number.isFinite(cv) || cv < 0 || cv > 1) {
+              err('BAD_CHROMA', `Clip ${clip.id} chroma.${ck} must be a number in 0–1`);
+            }
+          }
+        }
+      }
+      if (clip.mask != null) {
+        if (clip.kind !== 'video' && clip.kind !== 'image') {
+          err('BAD_MASK', `Clip ${clip.id} mask only applies to video/image clips`);
+        } else if (typeof clip.mask !== 'object' || Array.isArray(clip.mask)) {
+          err('BAD_MASK', `Clip ${clip.id} mask must be an object`);
+        } else {
+          if (clip.mask.type != null && !MASK_TYPES.includes(clip.mask.type)) {
+            err('BAD_MASK', `Clip ${clip.id} mask.type must be one of: ${MASK_TYPES.join(', ')}`);
+          }
+          for (const [mk, mv] of Object.entries(clip.mask)) {
+            if (mk === 'type') continue;
+            if (mk === 'invert') {
+              if (typeof mv !== 'boolean') err('BAD_MASK', `Clip ${clip.id} mask.invert must be a boolean`);
+              continue;
+            }
+            const range = MASK_RANGES[mk];
+            if (!range) {
+              err('BAD_MASK', `Clip ${clip.id} mask key must be one of: ${['type', ...Object.keys(MASK_RANGES), 'invert'].join(', ')}`);
+              continue;
+            }
+            const [lo, hi] = range;
+            if (typeof mv !== 'number' || !Number.isFinite(mv) || mv < lo || mv > hi) {
+              err('BAD_MASK', `Clip ${clip.id} mask.${mk} must be in ${lo}–${hi}`);
+            }
+          }
+        }
+      }
       if (clip.keyframes != null) {
         if (typeof clip.keyframes !== 'object' || clip.keyframes === null || Array.isArray(clip.keyframes)) {
           err('BAD_KEYFRAMES', `Clip ${clip.id} keyframes must be an object`);
@@ -1360,4 +1883,38 @@ function remapKeyframesSplit(keyframes, leftDur) {
     right[prop] = rightPts;
   }
   return { left, right };
+}
+
+/**
+ * Rescale `speedCurve` after a split. Speed is defined over *output* time, so each
+ * half keeps the slice of the profile it still plays (and they share the speed at
+ * the cut). Points are pinned to t=0/t=1 on both halves.
+ */
+function remapSpeedCurveSplit(clip, left, right, leftDur, rightDur) {
+  const dur = Number(clip.duration) || 0;
+  if (!(dur > 0) || !(leftDur > 0) || !(rightDur > 0)) return;
+  const curve = speedCurveOf(clip);
+  if (!curve) return;
+  const breaks = curveBreakpoints(curve.points);
+  const cutV = round3(curveSpeedAt(curve, clamp(leftDur / dur, 0, 1)));
+
+  const collect = (keep, map) => {
+    const pts = [];
+    for (const p of breaks) {
+      if (!keep(p.t * dur)) continue;
+      const t = round3(clamp(map(p.t * dur), 0, 1));
+      const node = { t, v: round3(p.v) };
+      if (pts.length && Math.abs(pts[pts.length - 1].t - t) < EPS) pts[pts.length - 1] = node;
+      else pts.push(node);
+    }
+    return pts;
+  };
+
+  const leftPts = collect((T) => T < leftDur - EPS, (T) => T / leftDur).filter((p) => p.t < 1 - EPS);
+  leftPts.push({ t: 1, v: cutV });
+  const rightPts = collect((T) => T > leftDur + EPS, (T) => (T - leftDur) / rightDur).filter((p) => p.t > EPS);
+  rightPts.unshift({ t: 0, v: cutV });
+
+  left.speedCurve = { preset: SPEED_CURVE_CUSTOM, points: leftPts };
+  right.speedCurve = { preset: SPEED_CURVE_CUSTOM, points: rightPts };
 }

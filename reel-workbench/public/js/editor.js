@@ -15,7 +15,16 @@ import {
   normalizeWatermark, defaultWatermark, WATERMARK_POSITIONS, staggerWordWindows,
   getLayoutMode, setLayoutMode, isSplitLayout, splitPanes, LAYOUT_MODES,
   snapPct, evalKeyframes, fadeGain, transitionGain, TRANSITIONS, KEYFRAME_PROPS,
-  clampFade, normalizeTransition,
+  clampFade, normalizeTransition, normalizeTransitionDur, DEFAULT_TRANSITION,
+  MIN_TRANSITION, MAX_TRANSITION,
+  GRADE_KEYS, GRADE_RANGES, GRADE_LABELS, GRADE_PRESETS, GRADE_KEYFRAME_PROPS,
+  DEFAULT_GRADE, normalizeGrade, isDefaultGrade, gradeOf,
+  SPEED_CURVE_PRESETS, SPEED_CURVE_PRESET_NAMES, SPEED_CURVE_CUSTOM,
+  MIN_SPEED_CURVE_POINTS, MAX_SPEED_CURVE_POINTS,
+  normalizeSpeedCurve, speedCurveOf, curveSpeedAt, speedCurveConstant, sourceTimeAt,
+  normalizeReverse,
+  DEFAULT_CHROMA, normalizeChroma,
+  MASK_TYPES, DEFAULT_MASK, MASK_RANGES, normalizeMask,
 } from '/shared/timeline-ops.js';
 
 /* ================= module state ================= */
@@ -61,6 +70,9 @@ const S = {
   phonePos: null, // {x,y} viewport px
   phoneBtn: null,
   phoneUserScale: 1, // user resize multiplier for 6.3" preview (persisted)
+  quickRefs: null, // toggle-button registry for the quick bar ({effect:{}, motion:{}, text:{}, caption:{}})
+  transSel: null, // quick-bar transition <select>
+  flashLayer: null, // white flash under-lay for `flash` transitions
 };
 
 export function editorCleanup() {
@@ -82,6 +94,9 @@ export function editorCleanup() {
   S.phoneOpen = false;
   S.phoneBtn = null;
   S.phoneSelBox = null;
+  S.quickRefs = null;
+  S.transSel = null;
+  S.flashLayer = null;
   document.body.classList.remove('sheet-open');
 }
 
@@ -299,12 +314,158 @@ function buildUi(root) {
     },
   });
 
+  /* ---- left: CapCut-style library (Media / Text / FX / Filters / …) ---- */
+  const sec = (text) => el('div', { class: 'lib-sec', text });
+  const grid = (items) => el('div', { class: 'lib-grid' }, ...items);
+  const labelize = (s) => (s || '').charAt(0).toUpperCase() + String(s || '').slice(1);
+  const libBtn = (label, title, active, onclick) => el('button', {
+    type: 'button', class: active ? 'lib-item active' : 'lib-item', title, onclick,
+    'aria-pressed': active ? 'true' : 'false',
+  }, el('span', { class: 'li-name', text: label }));
+
+  const mediaPane = () => el('div', { class: 'lib-pane' },
+    el('div', { class: 'region-hint', html: 'Drag a clip onto the <b>timeline</b> — or double-click to drop it at the red line.' }),
+    search, catChips, mediaList, importBtn);
+
+  const textMatch = (preset, clip) => !!clip && Object.entries(preset)
+    .every(([k, v]) => k === 'content' || JSON.stringify((clip.text || {})[k]) === JSON.stringify(v));
+
+  const textPane = () => {
+    let tclip = null;
+    try {
+      if (S.selection) {
+        const c = getClip(S.timeline, S.selection.trackId, S.selection.clipId);
+        if (c && c.kind === 'text') tclip = c;
+      }
+    } catch { tclip = null; }
+    if (!tclip) tclip = textClipAtPlayhead();
+    return el('div', { class: 'lib-pane' },
+      sec('Text styles'),
+      grid(Object.keys(TEXT_PRESETS).map((k) => libBtn(labelize(k), `Apply the "${k}" text style`, textMatch(TEXT_PRESETS[k], tclip), () => quickTextPreset(k)))),
+      sec('Captions · safe area'),
+      grid(Object.keys(CAPTION_PRESETS).map((k) => libBtn(labelize(k), `Apply the "${k}" caption style`, textMatch(CAPTION_PRESETS[k], tclip), () => quickCaptionPreset(k)))),
+    );
+  };
+
+  const effectsPane = () => {
+    const found = resolveMediaClip();
+    const clip = found?.clip || null;
+    const cur = clip ? normalizeEffect(clip.effect) : 'none';
+    const fit = clip ? normalizeTransform(clip).fit : 'cover';
+    return el('div', { class: 'lib-pane' },
+      sec('Color effects'),
+      grid(EFFECTS.map((ef) => libBtn(labelize(EFFECT_LABELS[ef] || ef), `Toggle ${EFFECT_LABELS[ef] || ef} on the clip`, cur === ef && ef !== 'none', () => quickEffect(ef)))),
+      sec('Framing'),
+      grid([
+        libBtn('Fit (no crop)', 'Letterbox instead of cropping', fit === 'contain', () => quickFit('contain')),
+        libBtn('Reset look', 'Clear fit, zoom, effect and grade', false, () => quickResetLook()),
+      ]),
+    );
+  };
+
+  const filtersPane = () => {
+    const clip = resolveMediaClip()?.clip || null;
+    const g = clip ? gradeOf(clip) : { ...DEFAULT_GRADE };
+    return el('div', { class: 'lib-pane' },
+      sec('Filters'),
+      grid(Object.keys(GRADE_PRESETS).map((k) => {
+        const want = normalizeGrade({ ...DEFAULT_GRADE, ...GRADE_PRESETS[k] });
+        const active = GRADE_KEYS.every((x) => Math.abs((g[x] || 0) - (want[x] || 0)) < 1e-6);
+        return libBtn(labelize(k), `Apply the ${k} filter`, active, () => applyGradePreset(k));
+      })),
+      sec('Tune'),
+      el('div', { class: 'muted', style: 'font-size:11px;line-height:1.5', text: 'Fine-tune exposure, contrast, saturation, temperature and vignette in Clip Tools → Color grading.' }),
+    );
+  };
+
+  const motionPane = () => {
+    const clip = resolveMediaClip()?.clip || null;
+    return el('div', { class: 'lib-pane' },
+      sec('Camera moves'),
+      grid(MOTION_LIB.map(([k, label]) => libBtn(label, `Toggle the ${label} move on the clip`, !!clip && hasMotionPreset(clip, k), () => applyMotionPreset(k)))),
+    );
+  };
+
+  const speedPane = () => {
+    const clip = resolveMediaClip()?.clip || null;
+    const curve = clip ? speedCurveOf(clip) : null;
+    const rev = clip ? normalizeReverse(clip.reverse) : false;
+    return el('div', { class: 'lib-pane' },
+      sec('Speed ramps'),
+      grid(SPEED_CURVE_PRESET_NAMES.map((k) => libBtn(
+        CURVE_PRESET_LABELS[k] || k,
+        `Toggle the ${CURVE_PRESET_LABELS[k] || k} speed ramp`,
+        !!curve && curve.preset === k && k !== 'constant',
+        () => applyCurvePreset(k),
+      ))),
+      sec('Reverse & still'),
+      grid([
+        libBtn(rev ? 'Reverse: ON' : 'Reverse', 'Play the clip backwards', rev, () => toggleReverse()),
+        libBtn('Freeze frame', 'Hold the current frame for 2s', false, () => doFreezeFrame()),
+        libBtn('Clear curve', 'Back to constant speed', false, () => {
+          const found = resolveMediaClip();
+          if (!found) { toast('Add a clip first', true); return; }
+          selectOnly(found.track.id, found.clip.id);
+          quickCommit(() => setClipProps(S.timeline, found.track.id, found.clip.id, { speedCurve: null }));
+          toast('Speed curve cleared');
+        }),
+      ]),
+    );
+  };
+
+  const transitionsPane = () => {
+    const clip = resolveMediaClip()?.clip || null;
+    const cur = clip ? normalizeTransition(clip.transitionIn) : 'none';
+    return el('div', { class: 'lib-pane' },
+      sec('Transitions'),
+      grid(TRANSITION_LIB.map(([k, label]) => libBtn(
+        label, `Toggle the ${label} transition on the clip`, cur === k, () => applyTransitionToSelection(k),
+      ))),
+      sec('Whole timeline'),
+      grid([
+        libBtn(`All cuts → ${S.transSel?.value === 'smart' ? 'auto mix' : (S.transSel?.value || 'auto mix')}`, 'Add the chosen transition between every clip', false, () => applyTransitionsToAll(false)),
+        libBtn('Clear every cut', 'Remove all transitions', false, () => applyTransitionsToAll(true)),
+        libBtn(`Cut length ${TRANS_DUR_STEPS[transDurIdx]}s`, 'Cycle how long each transition takes', false, () => cycleTransitionDur()),
+      ]),
+    );
+  };
+
+  const LIB_TABS = [
+    { id: 'media', label: 'Media', icon: '▦', build: mediaPane },
+    { id: 'text', label: 'Text', icon: 'T', build: textPane },
+    { id: 'effects', label: 'FX', icon: '✦', build: effectsPane },
+    { id: 'filters', label: 'Filters', icon: '◑', build: filtersPane },
+    { id: 'motion', label: 'Motion', icon: '➤', build: motionPane },
+    { id: 'speed', label: 'Speed', icon: '»', build: speedPane },
+    { id: 'transitions', label: 'Trans', icon: '⧉', build: transitionsPane },
+  ];
+  const libRail = el('div', { class: 'lib-rail', role: 'tablist', 'aria-label': 'Library categories' });
+  const libBody = el('div', { class: 'panel-body lib-body' });
+  let libTab = 'media';
+  const renderLib = () => {
+    libRail.querySelectorAll('.lib-tab').forEach((b) => {
+      const on = b.dataset.tab === libTab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    const tab = LIB_TABS.find((t) => t.id === libTab) || LIB_TABS[0];
+    libBody.innerHTML = '';
+    libBody.append(tab.build());
+  };
+  S.renderLib = renderLib;
+  for (const t of LIB_TABS) {
+    libRail.append(el('button', {
+      type: 'button', class: 'lib-tab', role: 'tab', dataset: { tab: t.id },
+      title: t.label, 'aria-selected': 'false',
+      onclick: () => { libTab = t.id; renderLib(); },
+    }, el('span', { class: 'lib-ico', text: t.icon }), el('span', { class: 'lib-lbl', text: t.label })));
+  }
+
   const leftPanel = el('div', { class: 'panel left' },
-    el('div', { class: 'panel-head', text: 'Media' }),
-    el('div', { class: 'panel-body' },
-      el('div', { class: 'region-hint', html: 'Drag a video onto the <b>timeline</b> below — or double-click to add at the red line.' }),
-      search, catChips, mediaList, importBtn)
+    el('div', { class: 'panel-head', text: 'Library' }),
+    el('div', { class: 'lib-wrap' }, libRail, libBody)
   );
+  renderLib();
 
   /* ---- center: preview ---- */
   const video = el('video', { playsinline: true, class: 'pane-media pane-a-media' });
@@ -327,6 +488,7 @@ function buildUi(root) {
   );
   const badges = el('div', { class: 'preview-badges', id: 'previewBadges' });
   const vignette = el('div', { class: 'vignette-layer hidden', id: 'vignetteLayer', 'aria-hidden': 'true' });
+  const flashLayer = el('div', { class: 'flash-layer hidden', 'aria-hidden': 'true' });
   const selBox = el('div', { class: 'sel-box', id: 'selBox' },
     el('div', { class: 'sh-label', text: '' }),
     ...['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((h) => el('div', { class: `sh ${h}`, dataset: { h } }))
@@ -335,7 +497,7 @@ function buildUi(root) {
     el('div', { class: 'sg-v' }),
     el('div', { class: 'sg-h' })
   );
-  const frame = el('div', { class: 'preview-frame' }, video, img, video2, img2, overlayLayer, textLayer, wmLayer, vignette, guides, emptyState, badges, snapGuides, selBox);
+  const frame = el('div', { class: 'preview-frame' }, video, img, video2, img2, overlayLayer, flashLayer, textLayer, wmLayer, vignette, guides, emptyState, badges, snapGuides, selBox);
   S.videoEl = video;
   S.imgEl = img;
   S.videoEl2 = video2;
@@ -345,6 +507,7 @@ function buildUi(root) {
   S.previewBadges = badges;
   S.previewEmpty = emptyState;
   S.vignetteLayer = vignette;
+  S.flashLayer = flashLayer;
   S.selBox = selBox;
   S.snapGuides = snapGuides;
   bindSelBox(selBox);
@@ -395,136 +558,73 @@ function buildUi(root) {
   });
   S.phoneBtn = phoneBtn;
 
+  /* Toggle registry: quick-bar buttons light up when their look is applied. */
+  const qrefs = { effect: {}, motion: {}, text: {}, caption: {}, transdur: {}, kf: {} };
+  S.quickRefs = qrefs;
+  const qbtn = (group, key, text, title, onclick) => {
+    const b = el('button', { class: 'btn sm qs-btn', type: 'button', text, title, onclick, dataset: group ? { qgroup: group, qkey: key } : null });
+    if (group && key && qrefs[group]) qrefs[group][key] = b;
+    return b;
+  };
+
   const quickStyle = el('div', { class: 'quick-style', id: 'quickStyle' },
     phoneBtn,
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Looks' }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '▣ Top title bar', title: 'Add/select text + full-width white top banner (meme look)',
-      onclick: () => quickMemeBanner(),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '◐ B&W', title: 'Black & white on selected video (or first video clip)',
-      onclick: () => quickEffect('bw'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '🎞 Vintage', title: 'Faded film look',
-      onclick: () => quickEffect('vintage'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '🌊 Teal', title: 'Teal & orange cinematic look',
-      onclick: () => quickEffect('teal'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '🌅 Golden', title: 'Warm golden-hour glow',
-      onclick: () => quickEffect('golden'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '🖤 Noir', title: 'High-contrast black & white',
-      onclick: () => quickEffect('noir'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '💜 Neon', title: 'Saturated neon pop',
-      onclick: () => quickEffect('neon'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '👑 Luxury', title: 'Premium warm gold grade',
-      onclick: () => quickEffect('luxury'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '◌ Vignette', title: 'Darken edges for cinematic focus',
-      onclick: () => quickEffect('vignette'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '☁ Soft', title: 'Soft focus / gentle gaussian blur',
-      onclick: () => quickEffect('soft'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '◻ Fit', title: 'No crop — letterbox video to fit',
-      onclick: () => quickFit('contain'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '↺ Reset', title: 'Reset fit/zoom/focus/effect on selected media',
-      onclick: () => quickResetLook(),
-    }),
+    qbtn(null, null, '▣ Top title bar', 'Add/select text + full-width white top banner (meme look)', () => quickMemeBanner()),
+    qbtn('effect', 'bw', '◐ B&W', 'Black & white on the target clip — click again to remove', () => quickEffect('bw')),
+    qbtn('effect', 'vintage', '🎞 Vintage', 'Faded film look — click again to remove', () => quickEffect('vintage')),
+    qbtn('effect', 'teal', '🌊 Teal', 'Teal & orange cinematic look — click again to remove', () => quickEffect('teal')),
+    qbtn('effect', 'golden', '🌅 Golden', 'Warm golden-hour glow — click again to remove', () => quickEffect('golden')),
+    qbtn('effect', 'noir', '🖤 Noir', 'High-contrast black & white — click again to remove', () => quickEffect('noir')),
+    qbtn('effect', 'neon', '💜 Neon', 'Saturated neon pop — click again to remove', () => quickEffect('neon')),
+    qbtn('effect', 'luxury', '👑 Luxury', 'Premium warm gold grade — click again to remove', () => quickEffect('luxury')),
+    qbtn('effect', 'vignette', '◌ Vignette', 'Darken edges for cinematic focus — click again to remove', () => quickEffect('vignette')),
+    qbtn('effect', 'soft', '☁ Soft', 'Soft focus / gentle gaussian blur — click again to remove', () => quickEffect('soft')),
+    qbtn('effect', 'contain', '◻ Fit', 'No crop — letterbox video to fit (click again for cover)', () => quickFit('contain')),
+    qbtn(null, null, '↺ Reset', 'Reset fit/zoom/focus/effect/grade on selected media', () => quickResetLook()),
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Motion' }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '↗ Push-in', title: 'Slow zoom in over the selected clip',
-      onclick: () => applyMotionPreset('push-in'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '⚡ Punch', title: 'Fast hard zoom punch-in at start',
-      onclick: () => applyMotionPreset('punch'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '⟵ Reveal', title: 'Zoom out from close-up',
-      onclick: () => applyMotionPreset('reveal'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '🎞 Ken Burns', title: 'Slow pan across the frame',
-      onclick: () => applyMotionPreset('kenburns'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '↻ Spin', title: 'Rotate 360° over the clip (smooth ease)',
-      onclick: () => applyMotionPreset('spin'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '〰 Float', title: 'Gentle vertical float bob',
-      onclick: () => applyMotionPreset('float'),
-    }),
+    qbtn('motion', 'push-in', '↗ Push-in', 'Slow zoom in over the selected clip — click again to remove', () => applyMotionPreset('push-in')),
+    qbtn('motion', 'punch', '⚡ Punch', 'Fast hard zoom punch-in at start — click again to remove', () => applyMotionPreset('punch')),
+    qbtn('motion', 'reveal', '⟵ Reveal', 'Zoom out from close-up — click again to remove', () => applyMotionPreset('reveal')),
+    qbtn('motion', 'kenburns', '🎞 Ken Burns', 'Slow pan across the frame — click again to remove', () => applyMotionPreset('kenburns')),
+    qbtn('motion', 'spin', '↻ Spin', 'Rotate 360° over the clip (smooth ease) — click again to remove', () => applyMotionPreset('spin')),
+    qbtn('motion', 'float', '〰 Float', 'Gentle vertical float bob — click again to remove', () => applyMotionPreset('float')),
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Text' }),
-    el('button', {
-      class: 'btn sm qs-btn', text: 'Fade', title: 'Text fade in/out animation',
-      onclick: () => quickTextAnim('fade'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: 'Pop', title: 'Text pop-in animation',
-      onclick: () => quickTextAnim('pop'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: 'Slide ↑', title: 'Text slides up into place',
-      onclick: () => quickTextAnim('slide-up'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: 'Bounce', title: 'Text bounces in',
-      onclick: () => quickTextAnim('bounce'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: 'Zoom-in', title: 'Text zooms in from small',
-      onclick: () => quickTextAnim('zoom-in'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '⚡ Flicker', title: 'Strobe/flicker entrance for titles',
-      onclick: () => quickTextAnim('flicker'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '◈ Glitch', title: 'Digital glitch entrance for tech/gaming titles',
-      onclick: () => quickTextAnim('glitch'),
-    }),
+    qbtn('text', 'fade', 'Fade', 'Text fade in/out animation — click again to remove', () => quickTextAnim('fade')),
+    qbtn('text', 'pop', 'Pop', 'Text pop-in animation — click again to remove', () => quickTextAnim('pop')),
+    qbtn('text', 'slide-up', 'Slide ↑', 'Text slides up into place — click again to remove', () => quickTextAnim('slide-up')),
+    qbtn('text', 'bounce', 'Bounce', 'Text bounces in — click again to remove', () => quickTextAnim('bounce')),
+    qbtn('text', 'zoom-in', 'Zoom-in', 'Text zooms in from small — click again to remove', () => quickTextAnim('zoom-in')),
+    qbtn('text', 'flicker', '⚡ Flicker', 'Strobe/flicker entrance for titles — click again to remove', () => quickTextAnim('flicker')),
+    qbtn('text', 'glitch', '◈ Glitch', 'Digital glitch entrance for tech/gaming titles — click again to remove', () => quickTextAnim('glitch')),
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Captions' }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '🎤 Karaoke', title: 'Word-by-word caption on T2 (reels style)',
-      onclick: () => quickCaptionPreset('karaoke'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '🔥 Pop', title: 'Yellow bold pop caption, word stagger',
-      onclick: () => quickCaptionPreset('pop'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '◻ Clean', title: 'Clean bold white caption in safe area',
-      onclick: () => quickCaptionPreset('clean'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: '▢ Boxed', title: 'Dark box caption',
-      onclick: () => quickCaptionPreset('boxed'),
-    }),
-    el('button', {
-      class: 'btn sm qs-btn', text: 'A Outline', title: 'Heavy outline caption',
-      onclick: () => quickCaptionPreset('outline'),
-    }),
+    qbtn('caption', 'karaoke', '🎤 Karaoke', 'Word-by-word caption on T2 (reels style) — click again to remove', () => quickCaptionPreset('karaoke')),
+    qbtn('caption', 'pop', '🔥 Pop', 'Yellow bold pop caption, word stagger — click again to remove', () => quickCaptionPreset('pop')),
+    qbtn('caption', 'clean', '◻ Clean', 'Clean bold white caption in safe area — click again to remove', () => quickCaptionPreset('clean')),
+    qbtn('caption', 'boxed', '▢ Boxed', 'Dark box caption — click again to remove', () => quickCaptionPreset('boxed')),
+    qbtn('caption', 'outline', 'A Outline', 'Heavy outline caption — click again to remove', () => quickCaptionPreset('outline')),
+    el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
+    el('span', { class: 'qs-label', text: 'Cuts' }),
+    (() => {
+      const sel = el('select', {
+        class: 'input qs-select',
+        'aria-label': 'Transition style for every cut',
+        title: 'Transition applied between clips',
+        onchange: () => refreshQuickStates(),
+      },
+        el('option', { value: 'smart' }, 'Auto mix'),
+        ...TRANSITIONS.filter((tr) => tr !== 'none').map((tr) =>
+          el('option', { value: tr }, tr === 'dip' ? 'Dip black' : tr.charAt(0).toUpperCase() + tr.slice(1)))
+      );
+      S.transSel = sel;
+      return sel;
+    })(),
+    qbtn(null, null, '⚡ Apply to cuts', 'Add the chosen transition to every cut — click again to clear them all', () => applyTransitionsToAll()),
+    qbtn('transdur', 'dur', '⏱ 0.3s', 'Transition length in seconds (0.05–2) — click to cycle 0.15 / 0.3 / 0.6 / 1', () => cycleTransitionDur()),
     el('span', { class: 'qs-sep', 'aria-hidden': 'true' }),
     el('span', { class: 'qs-label', text: 'Layout' }),
     el('button', {
@@ -835,7 +935,186 @@ function clipOnTrack(trackId, t) {
   return null;
 }
 
-/** Apply object-fit / object-position / zoom / color effect to a preview video or image. */
+/* ---- color grade preview (mirrors server buildGradeFilter) ---- */
+
+let gfxSeq = 0;
+
+/**
+ * Cached SVG feColorMatrix for channels CSS filters cannot express
+ * (exposure offset + white-balance temperature), matched to FFmpeg `eq`.
+ */
+function gradeMatrixRef(node, exposure, temperature) {
+  if (!node) return '';
+  const NS = 'http://www.w3.org/2000/svg';
+  let id = node.dataset.gfxGrade;
+  if (!id) {
+    id = `gfxGrade${++gfxSeq}`;
+    node.dataset.gfxGrade = id;
+    let root = document.getElementById('rwGradeFx');
+    if (!root) {
+      root = document.createElementNS(NS, 'svg');
+      root.id = 'rwGradeFx';
+      root.setAttribute('width', '0');
+      root.setAttribute('height', '0');
+      root.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden;pointer-events:none';
+      document.body.append(root);
+    }
+    const filter = document.createElementNS(NS, 'filter');
+    filter.id = id;
+    filter.setAttribute('color-interpolation-filters', 'sRGB');
+    const mtx = document.createElementNS(NS, 'feColorMatrix');
+    mtx.setAttribute('type', 'matrix');
+    filter.append(mtx);
+    root.append(filter);
+  }
+  const mtx = document.getElementById(id)?.querySelector('feColorMatrix');
+  if (!mtx) return '';
+  const off = round3(exposure * 0.4);
+  const kr = round3(1 + temperature * 0.22);
+  const kg = round3(1 + temperature * 0.02);
+  const kb = round3(1 - temperature * 0.22);
+  mtx.setAttribute('values', `${kr} 0 0 0 ${off} 0 ${kg} 0 0 ${off} 0 0 ${kb} 0 ${off} 0 0 0 1 0`);
+  return `url(#${id})`;
+}
+
+/** Effect + grade CSS filter for a clip at clip-local time `localT`. */
+function mediaFilterCss(clip, localT, node) {
+  if (!clip) return '';
+  const parts = [];
+  const ef = effectToCssFilter(clip.effect);
+  if (ef) parts.push(ef);
+  const g = gradeOf(clip);
+  const ex = evalKeyframes(clip, localT, 'exposure', g.exposure);
+  const ct = evalKeyframes(clip, localT, 'contrast', g.contrast);
+  const sa = evalKeyframes(clip, localT, 'saturation', g.saturation);
+  const tp = evalKeyframes(clip, localT, 'temperature', g.temperature);
+  if (Math.abs(ex) > 1e-6 || Math.abs(tp) > 1e-6) {
+    const ref = gradeMatrixRef(node, ex, tp);
+    if (ref) parts.push(ref);
+    else if (Math.abs(ex) > 1e-6) parts.push(`brightness(${(1 + ex).toFixed(3)})`);
+  }
+  if (Math.abs(ct) > 1e-6) parts.push(`contrast(${Math.max(0, 1 + ct).toFixed(3)})`);
+  if (Math.abs(sa) > 1e-6) parts.push(`saturate(${Math.max(0, 1 + sa).toFixed(3)})`);
+  const chroma = normalizeChroma(clip.chroma);
+  if (chroma) {
+    const ref = chromaMatrixRef(node, chroma);
+    if (ref) parts.push(ref);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Approximate chroma-key preview: SVG filter that turns "how green (or blue)
+ * is this pixel" into alpha — same similarity/blend knobs as FFmpeg `colorkey`.
+ * The export is exact; this is a close visual stand-in.
+ */
+function chromaMatrixRef(node, chroma) {
+  if (!node || !chroma) return '';
+  const NS = 'http://www.w3.org/2000/svg';
+  const rgb = hexToRgb(chroma.color || '#00ff00');
+  const blueKey = rgb && rgb.b > rgb.r && rgb.b > rgb.g;
+  let id = node.dataset.gfxChroma;
+  if (!id) {
+    id = `gfxChroma${++gfxSeq}`;
+    node.dataset.gfxChroma = id;
+    let root = document.getElementById('rwGradeFx');
+    if (!root) {
+      root = document.createElementNS(NS, 'svg');
+      root.id = 'rwGradeFx';
+      root.setAttribute('width', '0');
+      root.setAttribute('height', '0');
+      root.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden;pointer-events:none';
+      document.body.append(root);
+    }
+    const filter = document.createElementNS(NS, 'filter');
+    filter.id = id;
+    filter.setAttribute('color-interpolation-filters', 'sRGB');
+    filter.append(document.createElementNS(NS, 'feColorMatrix'));
+    filter.append(document.createElementNS(NS, 'feComponentTransfer'));
+    const transfer = filter.lastChild;
+    transfer.append(document.createElementNS(NS, 'feFuncA'));
+    root.append(filter);
+  }
+  const root = document.getElementById('rwGradeFx');
+  const filter = document.getElementById(id);
+  const mtx = filter?.querySelector('feColorMatrix');
+  const fn = filter?.querySelector('feFuncA');
+  if (!mtx || !fn) return '';
+  const blend = Math.max(0.02, Number(chroma.blend) || 0.15);
+  const sim = Math.max(0, Math.min(1, Number(chroma.similarity) || 0.3));
+  // a = 0.5*keyness + 0.5 ; alpha = clamp((sim - keyness)/blend)
+  mtx.setAttribute('values', blueKey
+    ? '-0.25 -0.25 0.5 0 0.5  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0'
+    : '-0.25 0.5 -0.25 0 0.5  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0');
+  fn.setAttribute('type', 'linear');
+  fn.setAttribute('slope', round3(-2 / blend));
+  fn.setAttribute('intercept', round3((sim + 1) / blend));
+  void root;
+  return `url(#${id})`;
+}
+
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+/** CSS mask (feathered shape) URI for a clip — mirrors the FFmpeg `geq` matte. */
+function maskUri(clip) {
+  const m = normalizeMask(clip?.mask);
+  if (!m) return '';
+  const W = 400;
+  const H = 400 * (9 / 16);
+  const cx = (m.x / 100) * W;
+  const cy = (m.y / 100) * H;
+  const w = Math.max(1, (m.w / 100) * W);
+  const h = Math.max(1, (m.h / 100) * H);
+  const blur = round3(m.feather * 18);
+  const rot = round3(m.rotation);
+  const fill = m.invert ? 'black' : 'white';
+  let shape;
+  if (m.type === 'rect') {
+    shape = `<rect x="${round3(cx - w / 2)}" y="${round3(cy - h / 2)}" width="${round3(w)}" height="${round3(h)}" fill="${fill}"/>`;
+  } else if (m.type === 'circle') {
+    const r = Math.max(1, Math.min(w, h) / 2);
+    shape = `<ellipse cx="${round3(cx)}" cy="${round3(cy)}" rx="${round3(r)}" ry="${round3(r)}" fill="${fill}"/>`;
+  } else if (m.type === 'line') {
+    shape = `<rect x="0" y="${round3(cy - h / 2)}" width="${W}" height="${round3(h)}" fill="${fill}"/>`;
+  } else {
+    shape = `<ellipse cx="${round3(cx)}" cy="${round3(cy)}" rx="${round3(w / 2)}" ry="${round3(h / 2)}" fill="${fill}"/>`;
+  }
+  const bg = m.invert ? `<rect width="${W}" height="${H}" fill="white"/>` : '';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`
+    + `<defs><filter id="f" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="${blur}"/></filter></defs>`
+    + `${bg}<g filter="url(#f)" transform="rotate(${rot} ${round3(cx)} ${round3(cy)})">${shape}</g></svg>`;
+  const uri = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+  return uri;
+}
+
+/** Apply/clear the shape mask on a preview element. */
+function applyMaskCss(node, clip) {
+  if (!node) return;
+  const uri = maskUri(clip);
+  for (const p of ['mask-image', '-webkit-mask-image']) node.style.setProperty(p, uri || 'none');
+  if (uri) {
+    for (const p of ['mask-size', '-webkit-mask-size']) node.style.setProperty(p, '100% 100%');
+    for (const p of ['mask-repeat', '-webkit-mask-repeat']) node.style.setProperty(p, 'no-repeat');
+    for (const p of ['mask-position', '-webkit-mask-position']) node.style.setProperty(p, 'center');
+  }
+}
+
+/** Vignette box-shadow CSS for a clip (overlays / PiP). */
+function vignetteShadowCss(clip) {
+  const v = gradeOf(clip).vignette;
+  if (v <= 1e-6) return '';
+  const blur = Math.round(28 + 54 * v);
+  const spread = Math.round(6 + 24 * v);
+  const alpha = (0.18 + 0.5 * v).toFixed(2);
+  return `inset 0 0 ${blur}px ${spread}px rgba(0,0,0,${alpha})`;
+}
+
+/** Apply object-fit / object-position / zoom / color effect + grade to preview media. */
 function applyClipTransform(el, clip) {
   if (!el) return;
   if (!clip) {
@@ -846,6 +1125,7 @@ function applyClipTransform(el, clip) {
     el.style.filter = '';
     el.style.opacity = '';
     el.classList.remove('fx-vignette');
+    applyMaskCss(el, null);
     return;
   }
   const base = normalizeTransform(clip);
@@ -856,7 +1136,6 @@ function applyClipTransform(el, clip) {
   const rotate = evalKeyframes(clip, localT, 'rotate', base.rotate);
   const opacityKf = evalKeyframes(clip, localT, 'opacity', 1);
   const trGain = transitionGain(clip, localT);
-  const fx = effectToCssFilter(clip?.effect);
   el.style.objectFit = base.fit;
   el.style.objectPosition = `${posX}% ${posY}%`;
   el.style.transformOrigin = `${posX}% ${posY}%`;
@@ -864,22 +1143,52 @@ function applyClipTransform(el, clip) {
   if (Math.abs(scale - 1) > 1e-6) xf.push(`scale(${scale})`);
   if (Math.abs(rotate) > 1e-6) xf.push(`rotate(${rotate}deg)`);
   el.style.transform = xf.join(' ');
-  el.style.filter = fx;
+  el.style.filter = mediaFilterCss(clip, localT, el);
+  applyMaskCss(el, clip);
   el.classList.toggle('fx-vignette', normalizeEffect(clip?.effect) === 'vignette');
   const op = Math.max(0, Math.min(1, opacityKf * trGain));
   el.style.opacity = op >= 0.999 ? '' : String(op);
 }
 
-/** Show/hide frame-level vignette when any active media uses the vignette look. */
+/**
+ * Frame-level vignette (effect `vignette` + graded vignette strength) and the
+ * white flash layer used by `flash` transitions — both mirrored in the export.
+ */
 function syncVignetteLayer() {
   const layer = S.vignetteLayer;
   if (!layer || !S.timeline) return;
   const t = S.playhead;
   let on = false;
+  let strength = 0;
   for (const { clip } of activeClips(S.timeline, t, ['video', 'image'])) {
-    if (normalizeEffect(clip.effect) === 'vignette') { on = true; break; }
+    if (normalizeEffect(clip.effect) === 'vignette') on = true;
+    const v = gradeOf(clip).vignette;
+    if (v > strength) strength = v;
   }
   layer.classList.toggle('hidden', !on);
+  if (strength > 1e-6) {
+    const alpha = (0.15 + 0.6 * strength).toFixed(2);
+    const stop = Math.round(58 - 24 * strength);
+    layer.style.background = `radial-gradient(ellipse at center, transparent ${stop}%, rgba(0,0,0,${alpha}) 100%)`;
+  } else {
+    layer.style.background = '';
+  }
+}
+
+/** White flash under text/overlays while the program clip is transitioning in. */
+function syncFlashLayer() {
+  const layer = S.flashLayer;
+  if (!layer || !S.timeline) return;
+  const t = S.playhead;
+  let op = 0;
+  const clip = clipOnTrack('v1', t);
+  if (clip && normalizeTransition(clip.transitionIn) === 'flash') {
+    const d = normalizeTransitionDur(clip.transitionDur);
+    const u = Math.max(0, (t - clip.start) / d);
+    op = Math.max(0, 1 - Math.min(1, u * 1.25));
+  }
+  layer.classList.toggle('hidden', op <= 0.001);
+  layer.style.opacity = op >= 0.999 ? '1' : String(op);
 }
 
 /** Collect floating overlay clips (v2 always; v3 only when not split) active at t. */
@@ -923,7 +1232,9 @@ function syncOverlaysInto(layer, play) {
       n.style.top = `${ov.yPct}%`;
       n.style.width = `${ov.widthPct}%`;
       n.style.opacity = op >= 0.999 ? '' : String(op);
-      n.style.filter = effectToCssFilter(clip.effect);
+      n.style.filter = mediaFilterCss(clip, localT, n);
+      applyMaskCss(n, clip);
+      n.style.boxShadow = vignetteShadowCss(clip);
       n.classList.toggle('fx-vignette', normalizeEffect(clip.effect) === 'vignette');
       n.classList.toggle('hidden', op <= 0.001);
     };
@@ -938,20 +1249,23 @@ function syncOverlaysInto(layer, play) {
     }
     if (clip.kind === 'video') {
       if (node.tagName !== 'VIDEO') { node.remove(); continue; }
+      const speed = clip.speed > 0 ? clip.speed : 1;
+      const remapped = !!speedCurveOf(clip) || normalizeReverse(clip.reverse);
+      const target = sourceTimeAt(clip, localT);
       if (node.dataset.src !== url) {
         node.src = url;
         node.dataset.src = url;
-        const speed = clip.speed > 0 ? clip.speed : 1;
         node.addEventListener('loadedmetadata', () => {
-          try { node.playbackRate = speed; node.currentTime = clip.srcIn + localT * speed; } catch { /* */ }
+          try { node.playbackRate = remapped ? 1 : speed; node.currentTime = target; } catch { /* */ }
         }, { once: true });
-      } else if (Math.abs(node.currentTime - (clip.srcIn + localT * (clip.speed || 1))) > 0.18) {
-        try { node.currentTime = clip.srcIn + localT * (clip.speed || 1); } catch { /* */ }
+      } else if (Math.abs(node.currentTime - target) > (remapped ? 0.02 : 0.18)) {
+        try { node.currentTime = target; } catch { /* */ }
       }
-      if (node.playbackRate !== (clip.speed || 1)) {
-        try { node.playbackRate = clip.speed || 1; } catch { /* */ }
+      const rate = remapped ? 1 : speed;
+      if (node.playbackRate !== rate) {
+        try { node.playbackRate = rate; } catch { /* */ }
       }
-      if (play) node.play?.().catch(() => {});
+      if (play && !remapped) node.play?.().catch(() => {});
       else node.pause?.();
     } else {
       if (node.tagName !== 'IMG') { node.remove(); continue; }
@@ -1995,24 +2309,27 @@ function syncPane(clip, videoEl, imgEl, { volume = 0, play = false, muted = fals
   videoEl.style.visibility = 'visible';
   applyClipTransform(videoEl, clip);
   const speed = clip.speed > 0 ? clip.speed : 1;
-  const target = clip.srcIn + (S.playhead - clip.start) * speed;
+  const remapped = !!speedCurveOf(clip) || normalizeReverse(clip.reverse);
+  const target = sourceTimeAt(clip, localT);
   const wantSrc = url ? `${url}` : '';
   if (videoEl.dataset.src !== wantSrc) {
     videoEl.src = wantSrc;
     videoEl.dataset.src = wantSrc;
     videoEl.addEventListener('loadedmetadata', () => {
-      try { videoEl.playbackRate = speed; videoEl.currentTime = target; } catch { /* */ }
+      try { videoEl.playbackRate = remapped ? 1 : speed; videoEl.currentTime = target; } catch { /* */ }
     }, { once: true });
   } else {
-    if (videoEl.playbackRate !== speed) {
-      try { videoEl.playbackRate = speed; } catch { /* */ }
+    const rate = remapped ? 1 : speed;
+    if (videoEl.playbackRate !== rate) {
+      try { videoEl.playbackRate = rate; } catch { /* */ }
     }
-    if (Math.abs(videoEl.currentTime - target) > 0.18) {
+    // Curved / reversed clips are stepped frame-by-frame from the playhead.
+    if (Math.abs(videoEl.currentTime - target) > (remapped ? 0.02 : 0.18)) {
       try { videoEl.currentTime = target; } catch { /* ignore */ }
     }
   }
   videoEl.volume = vol;
-  if (play) videoEl.play?.().catch(() => {});
+  if (play && !remapped) videoEl.play?.().catch(() => {});
   else videoEl.pause?.();
 }
 
@@ -2269,7 +2586,50 @@ function renderClip(track, clip) {
     const fit = normalizeTransform(clip).fit;
     if (fit === 'contain') featureBadges.push(el('span', { class: 'speed-badge feat', title: 'Fit mode', text: 'fit' }));
     if (Number(clip.scale) > 1 || Number(clip.scale) < 1) featureBadges.push(el('span', { class: 'speed-badge feat', title: 'Zoom', text: `${Number(clip.scale).toFixed(2)}×` }));
+    if (!isDefaultGrade(clip.grade)) {
+      featureBadges.push(el('span', {
+        class: 'speed-badge feat grade', title: 'Color graded — open Clip Tools to adjust',
+        text: 'grade',
+      }));
+    }
+    const tr = normalizeTransition(clip.transitionIn);
+    if (tr !== 'none') {
+      featureBadges.push(el('span', {
+        class: `speed-badge feat tr tr-${tr}`,
+        title: `${tr} transition in (${normalizeTransitionDur(clip.transitionDur)}s) — change in Clip Tools`,
+        text: tr === 'dip' ? 'dip' : tr,
+      }));
+    }
+    const curve = speedCurveOf(clip);
+    if (curve) {
+      const flat = speedCurveConstant(curve);
+      featureBadges.push(el('span', {
+        class: 'speed-badge feat curve',
+        title: flat ? `Constant speed curve ${flat}×` : `Speed curve "${curve.preset}" — edit in Clip Tools → Speed`,
+        text: flat ? `${flat}×` : 'curve',
+      }));
+    }
+    if (normalizeReverse(clip.reverse)) {
+      featureBadges.push(el('span', { class: 'speed-badge feat rev', title: 'Playing in reverse — toggle in Clip Tools → Speed', text: 'rev' }));
+    }
+    if (normalizeChroma(clip.chroma)) {
+      featureBadges.push(el('span', { class: 'speed-badge feat key', title: `Chroma key ${(clip.chroma.color || '#00ff00').toUpperCase()} — Clip Tools → Chroma`, text: 'key' }));
+    }
+    if (normalizeMask(clip.mask)) {
+      featureBadges.push(el('span', { class: 'speed-badge feat mask', title: `Mask: ${normalizeMask(clip.mask).type} — Clip Tools → Mask`, text: 'mask' }));
+    }
   }
+  if (clip.kind === 'audio') {
+    if (normalizeReverse(clip.reverse)) {
+      featureBadges.push(el('span', { class: 'speed-badge feat rev', title: 'Audio reversed', text: 'rev' }));
+    }
+    const curve = speedCurveOf(clip);
+    if (curve) featureBadges.push(el('span', { class: 'speed-badge feat curve', title: 'Audio speed curve', text: 'curve' }));
+  }
+  const kfCount = Object.values(clip.keyframes || {}).reduce((n, pts) => n + (Array.isArray(pts) ? pts.length : 0), 0);
+  const kfDot = kfCount
+    ? el('span', { class: 'kf-dot', title: `${kfCount} keyframe${kfCount > 1 ? 's' : ''} animated — click the + buttons in Clip Tools to remove` }, '◆')
+    : null;
   if (clip.kind === 'text') {
     const bm = normalizeBgMode((clip.text || {}).bgMode || ((clip.text || {}).bg ? 'inline' : 'none'));
     if (bm === 'full') featureBadges.push(el('span', { class: 'speed-badge feat', title: 'Top banner (meme)', text: 'banner' }));
@@ -2282,7 +2642,7 @@ function renderClip(track, clip) {
     title: `${label} · ${clip.start.toFixed(2)}–${clipEnd(clip).toFixed(2)}s${speed !== 1 ? ` · ${speed}× speed` : ''}${featureBadges.length ? ' · ' + featureBadges.map((b) => b.textContent).join(' · ') : ''} — Shift+click multi-select · double-click opens Clip Tools`,
   },
     el('span', { class: 'h l', dataset: { edge: 'l' } }),
-    el('span', { class: 'lbl' }, label, speedBadge, ...featureBadges),
+    el('span', { class: 'lbl' }, label, speedBadge, ...featureBadges, kfDot),
     el('span', { class: 'h r', dataset: { edge: 'r' } })
   );
   if (track.type === 'audio' || clip.kind === 'audio') {
@@ -2822,95 +3182,150 @@ function quickMemeBanner() {
   if (content) { content.focus(); content.select(); }
 }
 
+/** Target clip for the quick bar: current selection, else first media clip. */
+function resolveMediaClip() {
+  return selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
+}
+
+/** One-click look — click again to remove it (no undo needed). */
 function quickEffect(ef) {
-  const found = selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
+  const found = resolveMediaClip();
   if (!found) { toast('Add a video/image clip on the timeline first', true); return; }
   const { track, clip } = found;
   selectOnly(track.id, clip.id);
-  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, { effect: ef || 'none' }));
-  toast(`Effect: ${ef === 'bw' ? 'Black & white' : ef}`);
+  const cur = normalizeEffect(clip.effect);
+  const next = cur === ef ? 'none' : ef;
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, { effect: next }));
+  const names = {
+    bw: 'Black & white', vintage: 'Vintage', teal: 'Teal & orange', golden: 'Golden hour',
+    noir: 'Noir', neon: 'Neon', luxury: 'Luxury', vignette: 'Vignette', soft: 'Soft focus',
+    sepia: 'Sepia', warm: 'Warm', cool: 'Cool', vivid: 'Vivid',
+  };
+  toast(next === 'none' ? `${names[ef] || ef} removed` : `Effect: ${names[ef] || ef}`);
 }
 
 function quickFit(fit) {
-  const found = selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
+  const found = resolveMediaClip();
   if (!found) { toast('Add a video/image clip on the timeline first', true); return; }
   const { track, clip } = found;
   selectOnly(track.id, clip.id);
+  const next = normalizeTransform(clip).fit === fit ? 'cover' : fit;
   quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
-    fit, scale: 1, posX: 50, posY: 50, rotate: 0,
+    fit: next, scale: 1, posX: 50, posY: 50, rotate: 0,
   }));
-  toast(fit === 'contain' ? 'Fit mode: Contain (no crop)' : `Fit mode: ${fit}`);
+  toast(next === 'contain' ? 'Fit mode: Contain (no crop)' : 'Fit mode: Cover (crop to fill)');
 }
 
 function quickResetLook() {
-  const found = selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
+  const found = resolveMediaClip();
   if (!found) { toast('No media clip to reset', true); return; }
   const { track, clip } = found;
   selectOnly(track.id, clip.id);
-  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
-    fit: 'cover', scale: 1, posX: 50, posY: 50, rotate: 0, effect: 'none',
-  }));
-  toast('Look reset (fit, zoom, focus, rotate, effect)');
+  quickCommit(() => {
+    setClipProps(S.timeline, track.id, clip.id, {
+      fit: 'cover', scale: 1, posX: 50, posY: 50, rotate: 0, effect: 'none',
+      grade: { ...DEFAULT_GRADE }, chroma: null, mask: null,
+    });
+    const rest = { ...(clip.keyframes || {}) };
+    for (const p of ['exposure', 'contrast', 'saturation', 'temperature']) delete rest[p];
+    setClipProps(S.timeline, track.id, clip.id, { keyframes: rest });
+  });
+  toast('Look reset (fit, zoom, focus, rotate, effect, grade)');
 }
 
-/** One-click camera motion via scale/pos/rotate keyframes on selected media. */
-function applyMotionPreset(name) {
-  const found = selectedMediaClip() || findFirstMediaClip('video') || findFirstMediaClip('image');
-  if (!found) { toast('Add a video/image clip first', true); return; }
-  const { track, clip } = found;
-  selectOnly(track.id, clip.id);
-  const dur = Math.max(0.2, clip.duration);
-  const end = round3(dur);
-  const mid = round3(dur * 0.5);
-  let keyframes = {};
+/** Keyframe recipe for a motion preset (clip-local times). */
+function motionPresetKeyframes(name, dur) {
+  const end = round3(Math.max(0.2, dur));
+  const mid = round3(end * 0.5);
   if (name === 'push-in') {
-    keyframes = { scale: [{ t: 0, v: 1, ease: 'ease' }, { t: end, v: 1.08 }] };
-  } else if (name === 'punch') {
-    keyframes = { scale: [{ t: 0, v: 1.2, ease: 'out' }, { t: Math.min(0.35, dur * 0.35), v: 1, ease: 'ease' }, { t: end, v: 1.04 }] };
-  } else if (name === 'reveal') {
-    keyframes = { scale: [{ t: 0, v: 1.25, ease: 'ease' }, { t: end, v: 1 }] };
-  } else if (name === 'kenburns') {
-    keyframes = {
+    return { scale: [{ t: 0, v: 1, ease: 'ease' }, { t: end, v: 1.08 }] };
+  }
+  if (name === 'punch') {
+    return { scale: [{ t: 0, v: 1.2, ease: 'out' }, { t: round3(Math.min(0.35, end * 0.35)), v: 1, ease: 'ease' }, { t: end, v: 1.04 }] };
+  }
+  if (name === 'reveal') {
+    return { scale: [{ t: 0, v: 1.25, ease: 'ease' }, { t: end, v: 1 }] };
+  }
+  if (name === 'kenburns') {
+    return {
       scale: [{ t: 0, v: 1.08 }, { t: end, v: 1.08 }],
       posX: [{ t: 0, v: 44, ease: 'ease' }, { t: end, v: 56 }],
       posY: [{ t: 0, v: 50, ease: 'ease' }, { t: mid, v: 48, ease: 'ease' }, { t: end, v: 50 }],
     };
-  } else if (name === 'spin') {
-    keyframes = { rotate: [{ t: 0, v: 0, ease: 'ease' }, { t: end, v: 360 }] };
-  } else if (name === 'float') {
-    keyframes = {
+  }
+  if (name === 'spin') {
+    return { rotate: [{ t: 0, v: 0, ease: 'ease' }, { t: end, v: 360 }] };
+  }
+  if (name === 'float') {
+    return {
       posY: [{ t: 0, v: 50, ease: 'ease' }, { t: mid, v: 46, ease: 'ease' }, { t: end, v: 50 }],
       scale: [{ t: 0, v: 1.04, ease: 'ease' }, { t: end, v: 1.04 }],
     };
-  } else {
-    toast('Unknown motion preset', true);
-    return;
   }
-  const extra = { keyframes: { ...(clip.keyframes || {}), ...keyframes } };
-  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, extra));
-  const labels = {
-    'push-in': 'Slow push-in', punch: 'Punch-in', reveal: 'Zoom-out reveal',
-    kenburns: 'Ken Burns pan', spin: 'Spin 360°', float: 'Float',
-  };
-  toast(`Motion: ${labels[name] || name}`);
+  return null;
 }
 
-/** Apply text entrance animation (adds text clip if needed). */
+const MOTION_LABELS = {
+  'push-in': 'Slow push-in', punch: 'Punch-in', reveal: 'Zoom-out reveal',
+  kenburns: 'Ken Burns pan', spin: 'Spin 360°', float: 'Float',
+};
+
+/** True when the clip already carries this motion preset (button shows active). */
+function hasMotionPreset(clip, name) {
+  const want = motionPresetKeyframes(name, clip.duration);
+  if (!want) return false;
+  const have = clip.keyframes || {};
+  return Object.entries(want).every(([prop, pts]) => JSON.stringify(have[prop] || []) === JSON.stringify(pts));
+}
+
+/** One-click camera motion via keyframes — click again to remove it. */
+function applyMotionPreset(name) {
+  const found = resolveMediaClip();
+  if (!found) { toast('Add a video/image clip first', true); return; }
+  const { track, clip } = found;
+  selectOnly(track.id, clip.id);
+  const want = motionPresetKeyframes(name, clip.duration);
+  if (!want) { toast('Unknown motion preset', true); return; }
+  const on = hasMotionPreset(clip, name);
+  quickCommit(() => {
+    const kf = { ...(clip.keyframes || {}) };
+    if (on) {
+      for (const prop of Object.keys(want)) delete kf[prop];
+    } else {
+      Object.assign(kf, want);
+    }
+    setClipProps(S.timeline, track.id, clip.id, { keyframes: kf });
+  });
+  toast(on ? `Motion removed: ${MOTION_LABELS[name] || name}` : `Motion: ${MOTION_LABELS[name] || name}`);
+}
+
+/** Apply text entrance animation (adds text clip if needed) — click again to remove. */
 function quickTextAnim(anim) {
   const found = ensureTextAtPlayhead();
   if (!found) { toast('Could not add text clip', true); return; }
   const { track, clip } = found;
+  const on = normalizeTextAnim((clip.text || {}).anim) === anim;
   quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
-    text: { ...(clip.text || {}), anim, animDur: anim === 'fade' ? 0.3 : anim === 'flicker' ? 0.45 : anim === 'glitch' ? 0.5 : 0.35 },
+    text: {
+      ...(clip.text || {}),
+      anim: on ? 'none' : anim,
+      animDur: anim === 'fade' ? 0.3 : anim === 'flicker' ? 0.45 : anim === 'glitch' ? 0.5 : 0.35,
+    },
   }));
   const labels = {
     fade: 'Fade', pop: 'Pop', 'slide-up': 'Slide up', 'slide-down': 'Slide down',
     bounce: 'Bounce', 'zoom-in': 'Zoom in', flicker: 'Flicker', glitch: 'Glitch',
   };
-  toast(`Text animation: ${labels[anim] || anim}`);
+  toast(on ? `Text animation removed (${labels[anim] || anim})` : `Text animation: ${labels[anim] || anim}`);
 }
 
-/** Add/apply a caption preset on T2 (captions track) at the playhead. */
+/** True when a caption clip already wears this preset (content is free text). */
+function captionMatchesPreset(clip, preset) {
+  const t = clip.text || {};
+  return Object.entries(preset).every(([k, v]) => k === 'content' || JSON.stringify(t[k]) === JSON.stringify(v));
+}
+
+/** Add/apply a caption preset on T2 (captions track) — click again to remove it. */
 function quickCaptionPreset(name) {
   const preset = CAPTION_PRESETS[name];
   if (!preset) return;
@@ -2925,6 +3340,15 @@ function quickCaptionPreset(name) {
         const c = getClip(S.timeline, 't2', S.selection.clipId);
         if (c && c.kind === 'text') found = { track: getTrack(S.timeline, 't2'), clip: c };
       } catch { /* fall through */ }
+    }
+    if (found && captionMatchesPreset(found.clip, preset)) {
+      removeClip(S.timeline, 't2', found.clip.id);
+      clearSelection();
+      commit(snap);
+      renderTimeline(); renderInspector(); updateFooter(); updatePreviewText(true); syncMedia(true);
+      updatePreviewBadges(); flashPreview(); updateSelBox();
+      toast(`Caption removed (${name})`);
+      return;
     }
     if (!found) {
       const track = getTrack(S.timeline, 't2');
@@ -2984,8 +3408,14 @@ function quickPip(corner = 'br') {
       posY: clip.posY ?? 50,
       rotate: clip.rotate ?? 0,
       transitionIn: clip.transitionIn || 'none',
+      transitionDur: clip.transitionDur ?? DEFAULT_TRANSITION,
       fadeIn: clip.fadeIn || 0,
       fadeOut: clip.fadeOut || 0,
+      grade: clip.grade || null,
+      speedCurve: clip.speedCurve || null,
+      reverse: clip.reverse || false,
+      chroma: clip.chroma || null,
+      mask: clip.mask || null,
       keyframes: clip.keyframes || {},
     };
     removeClip(S.timeline, track.id, clip.id);
@@ -2998,16 +3428,612 @@ function quickPip(corner = 'br') {
   } catch (e) { toast(e.message, true); }
 }
 
+/* ================= transitions across every cut ================= */
+
+/** Clips that can carry a transition (the very first V1 clip has nothing before it). */
+function transitionCandidates() {
+  const out = [];
+  for (const track of S.timeline.tracks) {
+    if (track.type !== 'video') continue;
+    const clips = [...track.clips].sort((a, b) => a.start - b.start);
+    clips.forEach((clip, i) => {
+      if (clip.kind !== 'video' && clip.kind !== 'image') return;
+      if (track.id === 'v1' && i === 0) return;
+      out.push({ track, clip });
+    });
+  }
+  return out;
+}
+
+const SMART_CUTS = ['fade', 'zoom', 'slide', 'fade', 'dip', 'zoom'];
+
+/** Deterministic smart pick: punchy flash on tiny clips, gentle mix elsewhere. */
+function smartTransitionFor(clip, index) {
+  if (clip.duration <= 0.45) return 'flash';
+  return SMART_CUTS[index % SMART_CUTS.length];
+}
+
+/** Apply the chosen transition to every cut — pass `true` to clear them all. */
+function applyTransitionsToAll(forceClear = false) {
+  const mode = S.transSel?.value || 'smart';
+  const cands = transitionCandidates();
+  if (!cands.length) { toast('Add at least two clips first', true); return; }
+  const already = forceClear || (mode === 'smart'
+    ? cands.every(({ clip }) => normalizeTransition(clip.transitionIn) !== 'none')
+    : cands.every(({ clip }) => normalizeTransition(clip.transitionIn) === mode));
+  const next = already ? 'none' : mode;
+  let changed = 0;
+  quickCommit(() => {
+    cands.forEach(({ track, clip }, i) => {
+      const tr = next === 'smart' ? smartTransitionFor(clip, i) : next;
+      if (normalizeTransition(clip.transitionIn) === tr) return;
+      setClipProps(S.timeline, track.id, clip.id, { transitionIn: tr });
+      changed++;
+    });
+  });
+  if (next === 'none') toast(`Transitions cleared on ${cands.length} cut(s)`);
+  else toast(`${changed} cut(s) → ${next === 'smart' ? 'auto mix' : next}`);
+}
+
+const TRANS_DUR_STEPS = [0.15, 0.3, 0.6, 1];
+let transDurIdx = 1;
+
+/** Cycle how long each cut takes to come in (0.15 / 0.3 / 0.6 / 1s). */
+function cycleTransitionDur() {
+  transDurIdx = (transDurIdx + 1) % TRANS_DUR_STEPS.length;
+  const d = TRANS_DUR_STEPS[transDurIdx];
+  const cands = transitionCandidates();
+  const withTrans = cands.filter(({ clip }) => normalizeTransition(clip.transitionIn) !== 'none');
+  const list = withTrans.length ? withTrans : cands;
+  if (!list.length) { toast('Add clips first', true); return; }
+  quickCommit(() => {
+    for (const { track, clip } of list) setClipProps(S.timeline, track.id, clip.id, { transitionDur: d });
+  });
+  const b = S.quickRefs?.transdur?.dur;
+  if (b) b.textContent = `⏱ ${d}s`;
+  toast(`Transition length ${d}s on ${list.length} clip(s)`);
+}
+
+/* ================= grade (all clips) ================= */
+
+/** Apply a grade to every unlocked video/image clip in one undo step. */
+function gradeAllClips(grade) {
+  const snap = cloneTimeline(S.timeline);
+  let n = 0;
+  for (const track of S.timeline.tracks) {
+    if (track.type !== 'video' || track.locked) continue;
+    for (const c of [...track.clips]) {
+      if (c.kind !== 'video' && c.kind !== 'image') continue;
+      setClipProps(S.timeline, track.id, c.id, { grade });
+      n++;
+    }
+  }
+  if (!n) { toast('No media clips on the timeline', true); return 0; }
+  commit(snap);
+  renderTimeline(); renderInspector(); updateFooter(); updatePreviewText(true); syncMedia(true);
+  updatePreviewBadges(); flashPreview(); updateSelBox();
+  return n;
+}
+
+/* ================= quick-bar toggle state ================= */
+
+/** Target text clip for the quick bar: selection, else the clip under the playhead. */
+function textClipAtPlayhead() {
+  try {
+    const tr = getTrack(S.timeline, 't1');
+    const t = S.playhead;
+    return tr.clips.find((c) => t >= c.start - 1e-6 && t < clipEnd(c) - 1e-6) || null;
+  } catch { return null; }
+}
+
+/** True when the clip already has a keyframe on `prop` at the playhead. */
+function hasKfAtPlayhead(clip, prop) {
+  const localT = round3(Math.max(0, S.playhead - (clip.start || 0)));
+  const pts = clip?.keyframes?.[prop] || [];
+  return pts.some((p) => Math.abs(Number(p.t) - localT) <= 0.002);
+}
+
+/** Light up quick-bar / keyframe toggles that are currently applied. */
+function refreshQuickStates() {
+  const refs = S.quickRefs;
+  if (!refs || !S.timeline) return;
+  const on = (group, key, isOn) => {
+    const b = refs[group]?.[key];
+    if (!b) return;
+    b.classList.toggle('active', !!isOn);
+    b.setAttribute('aria-pressed', isOn ? 'true' : 'false');
+  };
+
+  const media = resolveMediaClip();
+  const clip = media?.clip || null;
+  const ef = clip ? normalizeEffect(clip.effect) : 'none';
+  const fit = clip ? normalizeTransform(clip).fit : 'cover';
+  for (const key of Object.keys(refs.effect)) {
+    on('effect', key, key === 'contain' ? fit === 'contain' : ef === key);
+  }
+  for (const key of Object.keys(refs.motion)) on('motion', key, !!clip && hasMotionPreset(clip, key));
+
+  const tsel = selectedTextClip()?.clip || textClipAtPlayhead();
+  const anim = normalizeTextAnim((tsel?.text || {}).anim);
+  for (const key of Object.keys(refs.text)) on('text', key, anim === key && anim !== 'none');
+
+  let capClip = null;
+  if (S.selection?.trackId === 't2') {
+    try { capClip = getClip(S.timeline, 't2', S.selection.clipId); } catch { capClip = null; }
+  }
+  for (const key of Object.keys(refs.caption)) {
+    on('caption', key, !!capClip && !!CAPTION_PRESETS[key] && captionMatchesPreset(capClip, CAPTION_PRESETS[key]));
+  }
+
+  // keyframe diamonds in the inspector (depends on the playhead)
+  let selClip = null;
+  if (S.selection) {
+    try { selClip = getClip(S.timeline, S.selection.trackId, S.selection.clipId); } catch { selClip = null; }
+  }
+  for (const key of Object.keys(refs.kf || {})) {
+    on('kf', key, !!selClip && hasKfAtPlayhead(selClip, key));
+  }
+}
+
+/* ================= pro tools: speed curve / reverse / chroma / mask ========= */
+
+const CURVE_PRESET_LABELS = {
+  constant: 'Flat', fastStart: 'Fast start', fastEnd: 'Fast end', flashIn: 'Flash in',
+  sloMo: 'Slo-mo', montage: 'Montage', hero: 'Hero',
+};
+const CURVE_VMAX = 4;
+
+/** Live-draggable speed ramp editor (points are committed on release). */
+function speedCurveEditor(clip, track, apply) {
+  const W = 600;
+  const H = 170;
+  const canvas = el('canvas', { class: 'curve-canvas', width: W, height: H });
+  const wrap = el('div', { class: 'curve-wrap', title: 'Drag points · double-click to add · right-click a point to remove' }, canvas);
+  const ctx = canvas.getContext('2d');
+  let points = (speedCurveOf(clip)?.points || []).map((p) => ({ t: Number(p.t), v: Number(p.v) }));
+  let snap = null;
+  let drag = -1;
+  const toX = (t) => 6 + t * (W - 12);
+  const toY = (v) => H - 8 - (Math.max(0, Math.min(CURVE_VMAX, v)) / CURVE_VMAX) * (H - 16);
+  const toT = (x) => Math.max(0, Math.min(1, (x - 6) / (W - 12)));
+  const toV = (y) => Math.max(MIN_SPEED, Math.min(MAX_SPEED, ((H - 8 - y) / (H - 16)) * CURVE_VMAX));
+
+  const draw = () => {
+    const css = getComputedStyle(document.documentElement);
+    const accent = (css.getPropertyValue('--accent') || '#6a5bff').trim();
+    const line = (css.getPropertyValue('--line2') || '#2a2d34').trim();
+    const dim = (css.getPropertyValue('--text3') || '#6b7280').trim();
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,.03)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = line;
+    ctx.lineWidth = 1;
+    for (const g of [1, 2, 3]) {
+      const y = toY(g);
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      ctx.fillStyle = dim;
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillText(`${g}×`, 4, y - 3);
+    }
+    const y1 = toY(1);
+    ctx.strokeStyle = 'rgba(255,255,255,.28)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, y1); ctx.lineTo(W, y1); ctx.stroke();
+    ctx.setLineDash([]);
+    if (points.length > 1) {
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(toX(points[0].t), toY(points[0].v));
+      for (let i = 1; i < points.length; i++) {
+        const p0 = points[i - 1];
+        const p1 = points[i];
+        const x0 = toX(p0.t);
+        const x1 = toX(p1.t);
+        ctx.bezierCurveTo((x0 + x1) / 2, toY(p0.v), (x0 + x1) / 2, toY(p1.v), x1, toY(p1.v));
+      }
+      ctx.stroke();
+      ctx.fillStyle = accent;
+      for (const p of points) {
+        ctx.beginPath();
+        ctx.arc(toX(p.t), toY(p.v), 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = dim;
+      ctx.fillText('time →', W - 46, H - 6);
+    } else {
+      ctx.fillStyle = dim;
+      ctx.font = '12px system-ui, sans-serif';
+      ctx.fillText('Constant speed — click a preset, or double-click to draw a ramp', 18, H / 2);
+    }
+  };
+
+  const nearest = (x, y) => {
+    let best = -1;
+    let bd = 16;
+    points.forEach((p, i) => {
+      const d = Math.hypot(toX(p.t) - x, toY(p.v) - y);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+  };
+
+  const store = (changed) => {
+    if (!changed) return;
+    const normalized = normalizeSpeedCurve({ preset: SPEED_CURVE_CUSTOM, points });
+    snap = null;
+    apply(() => setClipProps(S.timeline, track.id, clip.id, { speedCurve: normalized }));
+  };
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const r = canvas.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * W;
+    const y = ((e.clientY - r.top) / r.height) * H;
+    if (e.button === 2) {
+      const i = nearest(x, y);
+      if (i >= 0 && points.length > MIN_SPEED_CURVE_POINTS) {
+        points.splice(i, 1);
+        store(true);
+      }
+      return;
+    }
+    const i = nearest(x, y);
+    if (i < 0) return;
+    drag = i;
+    snap = cloneTimeline(S.timeline);
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (drag < 0) return;
+    const r = canvas.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * W;
+    const y = ((e.clientY - r.top) / r.height) * H;
+    const p = points[drag];
+    const isEnd = drag === 0 || drag === points.length - 1;
+    let t = isEnd ? p.t : toT(x);
+    const lo = drag > 0 ? points[drag - 1].t + 0.02 : 0;
+    const hi = drag < points.length - 1 ? points[drag + 1].t - 0.02 : 1;
+    p.t = round3(Math.max(lo, Math.min(hi, t)));
+    p.v = round3(toV(y));
+    draw();
+    const live = normalizeSpeedCurve({ preset: SPEED_CURVE_CUSTOM, points });
+    clip.speedCurve = live;
+    syncMedia(false);
+  });
+  const endDrag = (e) => {
+    if (drag < 0) return;
+    try { canvas.releasePointerCapture(e.pointerId); } catch { /* */ }
+    drag = -1;
+    store(true);
+  };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('dblclick', (e) => {
+    const r = canvas.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * W;
+    const y = ((e.clientY - r.top) / r.height) * H;
+    const t = toT(x);
+    if (points.length >= MAX_SPEED_CURVE_POINTS) { toast('Speed curve is full (32 points)', true); return; }
+    if (!points.length) {
+      points = [{ t: 0, v: 1 }, { t: 1, v: 1 }];
+    }
+    let idx = points.findIndex((p) => p.t > t);
+    if (idx <= 0) idx = points.length;
+    const prev = points[idx - 1];
+    const next = points[idx];
+    if (next && next.t - prev.t < 0.04) { toast('Too close to an existing point', true); return; }
+    points.splice(idx, 0, { t: round3(t), v: round3(toV(y)) });
+    store(true);
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  draw();
+  return wrap;
+}
+
+/** Speed presets + curve + reverse + freeze for the selected clip. */
+function appendSpeedSection(grid, apply, track, clip, withFreeze = true) {
+  const curve = speedCurveOf(clip);
+  const presetRow = el('div', { class: 'full style-presets' },
+    ...SPEED_CURVE_PRESET_NAMES.map((name) => {
+      const isActive = !!curve && curve.preset === name && name !== 'constant';
+      return el('button', {
+        class: isActive ? 'btn sm active' : 'btn sm',
+        title: isActive ? 'Click to remove this speed curve' : `Apply the ${CURVE_PRESET_LABELS[name]} speed ramp`,
+        text: CURVE_PRESET_LABELS[name] || name,
+        onclick: () => {
+          if (isActive) apply(() => setClipProps(S.timeline, track.id, clip.id, { speedCurve: null }));
+          else apply(() => setClipProps(S.timeline, track.id, clip.id, {
+            speedCurve: { preset: name, points: SPEED_CURVE_PRESETS[name] },
+          }));
+        },
+      });
+    }),
+    el('button', {
+      class: 'btn sm',
+      title: 'Clear the speed curve and go back to constant speed',
+      text: 'Clear curve',
+      onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { speedCurve: null })),
+    }),
+  );
+  const revOn = normalizeReverse(clip.reverse);
+  grid.append(
+    el('div', { class: 'full insp-sec' }, 'Speed ramp'),
+    presetRow,
+    speedCurveEditor(clip, track, apply),
+    el('div', { class: 'full', style: 'display:flex;gap:6px;flex-wrap:wrap' },
+      el('button', {
+        class: revOn ? 'btn sm active' : 'btn sm',
+        text: '⟲ Reverse',
+        title: 'Play this clip backwards — click again to turn it off',
+        onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { reverse: !revOn })),
+      }),
+      withFreeze ? el('button', {
+        class: 'btn sm',
+        text: '❄ Freeze frame',
+        title: 'Split at the playhead and hold this frame for 2s',
+        onclick: () => doFreezeFrame(),
+      }) : null,
+    ),
+  );
+}
+
+/** Chroma key (green/blue screen) controls. */
+function appendChromaSection(grid, apply, track, clip) {
+  const cur = normalizeChroma(clip.chroma);
+  const on = !!cur;
+  const c = cur || DEFAULT_CHROMA;
+  const mk = (label, key, min, max, step) => {
+    const rng = el('input', {
+      class: 'input range', type: 'range', min: String(min), max: String(max), step: String(step),
+      value: String(c[key]), 'aria-label': label,
+    });
+    const out = el('output', { class: 'grade-val', text: Number(c[key]).toFixed(2) });
+    let snap = null;
+    rng.addEventListener('input', () => {
+      if (!on) return;
+      if (!snap) snap = cloneTimeline(S.timeline);
+      const g = normalizeChroma(clip.chroma) || { ...DEFAULT_CHROMA };
+      g[key] = Number(rng.value);
+      clip.chroma = normalizeChroma(g);
+      out.textContent = Number(rng.value).toFixed(2);
+      syncMedia(false);
+    });
+    rng.addEventListener('change', () => {
+      if (!snap) return;
+      const s = snap; snap = null;
+      commit(s);
+      renderTimeline(); renderInspector(); updateFooter(); syncMedia(false); updatePreviewBadges(); flashPreview();
+    });
+    rng.disabled = !on;
+    return el('label', { class: 'field full grade-field' }, el('span', { text: label }), rng, out);
+  };
+  const color = el('input', {
+    class: 'input', type: 'color', value: /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : '#00ff00',
+    'aria-label': 'Key color', disabled: !on || undefined,
+    onchange: (e) => { if (on) apply(() => setClipProps(S.timeline, track.id, clip.id, { chroma: { ...(normalizeChroma(clip.chroma) || DEFAULT_CHROMA), color: e.target.value } })); },
+  });
+  grid.append(
+    el('div', { class: 'full insp-sec' }, 'Chroma key'),
+    el('div', { class: 'full', style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center' },
+      el('button', {
+        class: on ? 'btn sm active' : 'btn sm',
+        text: on ? 'Key: ON' : 'Key: OFF',
+        title: 'Cut out the background colour (green/blue screen) — click to toggle',
+        onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { chroma: on ? null : { ...DEFAULT_CHROMA } })),
+      }),
+      el('span', { class: 'muted', style: 'font-size:11px', text: on ? 'Pick the screen colour, then tune tolerance' : 'Best on PiP / overlay clips' }),
+    ),
+    on ? el('label', { class: 'field full grade-field' }, el('span', { text: 'Key colour' }), color, el('output', { class: 'grade-val', text: '' })) : null,
+    on ? mk('Tolerance', 'similarity', 0, 1, 0.01) : null,
+    on ? mk('Edge softness', 'blend', 0, 1, 0.01) : null,
+    on ? mk('Spill removal', 'despill', 0, 1, 0.01) : null,
+  );
+}
+
+/** Shape mask controls (feathered rect / ellipse / circle / line). */
+function appendMaskSection(grid, apply, track, clip) {
+  const cur = normalizeMask(clip.mask);
+  const on = !!cur;
+  const m = cur || DEFAULT_MASK;
+  const mk = (label, key) => {
+    const [lo, hi] = MASK_RANGES[key];
+    const step = key === 'feather' ? 0.01 : 1;
+    const rng = el('input', {
+      class: 'input range', type: 'range', min: String(lo), max: String(hi), step: String(step),
+      value: String(m[key]), 'aria-label': label,
+    });
+    const out = el('output', { class: 'grade-val', text: String(m[key]) });
+    let snap = null;
+    rng.addEventListener('input', () => {
+      if (!on) return;
+      if (!snap) snap = cloneTimeline(S.timeline);
+      const g = normalizeMask(clip.mask) || { ...DEFAULT_MASK };
+      g[key] = Number(rng.value);
+      clip.mask = normalizeMask(g);
+      out.textContent = rng.value;
+      syncMedia(false);
+    });
+    rng.addEventListener('change', () => {
+      if (!snap) return;
+      const s = snap; snap = null;
+      commit(s);
+      renderTimeline(); renderInspector(); updateFooter(); syncMedia(false); updatePreviewBadges(); flashPreview();
+    });
+    rng.disabled = !on;
+    return el('label', { class: 'field full grade-field' }, el('span', { text: label }), rng, out);
+  };
+  const typeSel = el('select', {
+    class: 'input', 'aria-label': 'Mask shape', disabled: !on || undefined,
+    onchange: (e) => { if (on) apply(() => setClipProps(S.timeline, track.id, clip.id, { mask: { ...(normalizeMask(clip.mask) || DEFAULT_MASK), type: e.target.value } })); },
+  }, MASK_TYPES.map((ty) => el('option', { value: ty, selected: m.type === ty || undefined }, ty)));
+  grid.append(
+    el('div', { class: 'full insp-sec' }, 'Mask'),
+    el('div', { class: 'full', style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center' },
+      el('button', {
+        class: on ? 'btn sm active' : 'btn sm',
+        text: on ? 'Mask: ON' : 'Mask: OFF',
+        title: 'Show only the shape — click to toggle',
+        onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { mask: on ? null : { ...DEFAULT_MASK } })),
+      }),
+      on ? el('button', {
+        class: (m.invert ? 'btn sm active' : 'btn sm'),
+        text: 'Invert',
+        title: 'Cut the shape out instead of keeping it',
+        onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { mask: { ...(normalizeMask(clip.mask) || DEFAULT_MASK), invert: !m.invert } })),
+      }) : null,
+    ),
+    on ? el('label', { class: 'field full' }, el('span', { text: 'Shape' }), typeSel) : null,
+    on ? mk('Width %', 'w') : null,
+    on ? mk('Height %', 'h') : null,
+    on ? mk('Centre X %', 'x') : null,
+    on ? mk('Centre Y %', 'y') : null,
+    on ? mk('Feather', 'feather') : null,
+    on ? mk('Rotation °', 'rotation') : null,
+  );
+}
+
+/**
+ * Freeze frame: split the selected video clip at the playhead and hold that
+ * exact frame for 2s (the still is captured from the live preview).
+ */
+async function doFreezeFrame() {
+  const found = selectedMediaClip() || findFirstMediaClip('video');
+  if (!found) { toast('Select a video clip first', true); return; }
+  const v = S.videoEl;
+  if (!v || !v.videoWidth || v.readyState < 2) { toast('Wait for the preview frame to load', true); return; }
+  const { track, clip } = found;
+  const local = S.playhead - clip.start;
+  const atStart = local <= 0.001;
+  if (!atStart && (local < 0.05 || local > clip.duration - 0.05)) {
+    toast('Park the playhead inside the clip', true);
+    return;
+  }
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = v.videoWidth;
+    canvas.height = v.videoHeight;
+    canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+    if (!blob) { toast('Could not capture the frame', true); return; }
+    const file = new File([blob], `freeze-${Date.now()}.png`, { type: 'image/png' });
+    const data = await uploadFiles([file], { category: 'image' });
+    const asset = data?.media?.[0];
+    if (!asset) throw new Error('Freeze frame upload failed');
+    await reloadMediaFromServer();
+
+    const snap = cloneTimeline(S.timeline);
+    const FREEZE = 2;
+    const at = S.playhead;
+    // Split at the playhead, ripple later clips, then drop the still in the gap.
+    if (local > 0.05) splitClip(S.timeline, track.id, clip.id, at);
+    const right = track.clips.filter((c) => c.start >= at - 1e-6).sort((a, b) => a.start - b.start);
+    for (const c of right) moveClip(S.timeline, track.id, c.id, c.start + FREEZE);
+    const nc = addClip(S.timeline, track.id, {
+      kind: 'image', assetId: asset.id, start: at, duration: FREEZE,
+      fit: clip.fit || 'cover', scale: clip.scale ?? 1, posX: clip.posX ?? 50, posY: clip.posY ?? 50,
+      rotate: clip.rotate || 0, effect: clip.effect || 'none',
+      grade: clip.grade || null, transitionIn: normalizeTransition(clip.transitionIn),
+      transitionDur: clip.transitionDur ?? DEFAULT_TRANSITION,
+    });
+    selectOnly(track.id, nc.id);
+    commit(snap);
+    renderTimeline(); renderInspector(); updateFooter(); updatePreviewText(true); syncMedia(true);
+    updatePreviewBadges(); flashPreview(); updateSelBox();
+    toast('Freeze frame inserted (2s)');
+  } catch (e) { toast(e.message || 'Freeze frame failed', true); }
+}
+
+/* ================= library actions (one-click, CapCut-style) =============== */
+
+const EFFECT_LABELS = {
+  none: 'Original', bw: 'B&W', vintage: 'Vintage', teal: 'Teal & orange', golden: 'Golden hour',
+  noir: 'Noir', neon: 'Neon', luxury: 'Luxury', vignette: 'Vignette', soft: 'Soft focus',
+  sepia: 'Sepia', warm: 'Warm', cool: 'Cool', vivid: 'Vivid',
+};
+const MOTION_LIB = [
+  ['push-in', 'Push-in'], ['punch', 'Punch'], ['reveal', 'Zoom reveal'],
+  ['kenburns', 'Ken Burns'], ['spin', 'Spin 360°'], ['float', 'Float'],
+];
+const TRANSITION_LIB = [
+  ['fade', 'Crossfade'], ['dip', 'Dip to black'], ['flash', 'White flash'],
+  ['zoom', 'Zoom in'], ['slide', 'Slide'], ['none', 'Hard cut'],
+];
+
+/** Apply a text style preset to the text at the playhead (creates one if needed). */
+function quickTextPreset(name) {
+  const preset = TEXT_PRESETS[name];
+  if (!preset) return;
+  const found = ensureTextAtPlayhead();
+  if (!found) { toast('Could not add a text clip', true); return; }
+  const { track, clip } = found;
+  const t = clip.text || {};
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
+    text: { ...preset, content: t.content && t.content !== 'Your text' ? t.content : preset.content },
+  }));
+  toast(`Text style: ${name}`);
+}
+
+/** Apply a one-click filter (grade preset) to the target clip. */
+function applyGradePreset(name) {
+  const want = normalizeGrade({ ...DEFAULT_GRADE, ...GRADE_PRESETS[name] });
+  const found = resolveMediaClip();
+  if (!found) { toast('Add a video/image clip first', true); return; }
+  const { track, clip } = found;
+  selectOnly(track.id, clip.id);
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, { grade: want }));
+  toast(`Filter: ${name}`);
+}
+
+/** Toggle a speed-curve ramp on the target clip. */
+function applyCurvePreset(name) {
+  const found = resolveMediaClip();
+  if (!found) { toast('Add a video/image clip first', true); return; }
+  const { track, clip } = found;
+  selectOnly(track.id, clip.id);
+  const on = speedCurveOf(clip)?.preset === name && name !== 'constant';
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, {
+    speedCurve: on ? null : { preset: name, points: SPEED_CURVE_PRESETS[name] },
+  }));
+  toast(on ? 'Speed curve removed' : `Speed ramp: ${CURVE_PRESET_LABELS[name] || name}`);
+}
+
+/** Toggle a transition on the target clip. */
+function applyTransitionToSelection(tr) {
+  const found = resolveMediaClip();
+  if (!found) { toast('Add a video/image clip first', true); return; }
+  const { track, clip } = found;
+  selectOnly(track.id, clip.id);
+  const on = normalizeTransition(clip.transitionIn) === tr && tr !== 'none';
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, { transitionIn: on ? 'none' : tr }));
+  toast(on ? 'Transition removed' : `Transition: ${tr}`);
+}
+
+/** Toggle reverse on the target clip. */
+function toggleReverse() {
+  const found = resolveMediaClip();
+  if (!found) { toast('Add a video/image clip first', true); return; }
+  const { track, clip } = found;
+  selectOnly(track.id, clip.id);
+  const on = !normalizeReverse(clip.reverse);
+  quickCommit(() => setClipProps(S.timeline, track.id, clip.id, { reverse: on }));
+  toast(on ? 'Reversed — plays backwards' : 'Reverse off');
+}
+
 /* ================= inspector ================= */
 
 function currentKfValue(clip, prop, localT) {
   const base = normalizeTransform(clip);
+  const g = gradeOf(clip);
   if (prop === 'scale') return evalKeyframes(clip, localT, 'scale', base.scale);
   if (prop === 'posX') return evalKeyframes(clip, localT, 'posX', base.posX);
   if (prop === 'posY') return evalKeyframes(clip, localT, 'posY', base.posY);
   if (prop === 'rotate') return evalKeyframes(clip, localT, 'rotate', base.rotate);
   if (prop === 'opacity') return evalKeyframes(clip, localT, 'opacity', 1);
   if (prop === 'volume') return evalKeyframes(clip, localT, 'volume', clip.volume ?? 1);
+  if (prop === 'exposure') return evalKeyframes(clip, localT, 'exposure', g.exposure);
+  if (prop === 'contrast') return evalKeyframes(clip, localT, 'contrast', g.contrast);
+  if (prop === 'saturation') return evalKeyframes(clip, localT, 'saturation', g.saturation);
+  if (prop === 'temperature') return evalKeyframes(clip, localT, 'temperature', g.temperature);
   return 0;
 }
 
@@ -3024,6 +4050,7 @@ function renderInspector(focusText = false) {
   const box = document.getElementById('inspector');
   if (!box) return;
   box.innerHTML = '';
+  if (S.quickRefs) S.quickRefs.kf = {}; // rebuilt below; cleared when nothing is selected
   const found = S.selection ? (() => { try { return getClip(S.timeline, S.selection.trackId, S.selection.clipId); } catch { return null; } })() : null;
   if (!found) {
     box.append(
@@ -3034,6 +4061,8 @@ function renderInspector(focusText = false) {
         el('div', { class: 'ie-hint', text: 'Quick looks, Motion, and Text FX are under the preview — or open Clip Tools on the right (or bottom sheet on mobile).' })
       )
     );
+    refreshQuickStates();
+    S.renderLib?.();
     return;
   }
   const { track, clip } = found;
@@ -3082,8 +4111,20 @@ function renderInspector(focusText = false) {
           el('select', { class: 'input', onchange: (e) => apply(() => setClipProps(S.timeline, track.id, clip.id, { transitionIn: e.target.value })) },
             TRANSITIONS.map((tr) => el('option', {
               value: tr,
-              selected: (clip.transitionIn || 'none') === tr || undefined,
+              selected: normalizeTransition(clip.transitionIn) === tr || undefined,
             }, tr === 'none' ? 'Hard cut' : tr))))
+      : null,
+    (clip.kind === 'video' || clip.kind === 'image')
+      ? el('label', { class: 'field' }, el('span', { text: 'Cut length (s)' }),
+          el('input', {
+            class: 'input', type: 'number', step: '0.05',
+            min: String(MIN_TRANSITION), max: String(MAX_TRANSITION),
+            value: String(normalizeTransitionDur(clip.transitionDur)),
+            title: 'How long the transition takes to come in (0.05–2s)',
+            onchange: (e) => apply(() => setClipProps(S.timeline, track.id, clip.id, {
+              transitionDur: normalizeTransitionDur(Number(e.target.value)),
+            })),
+          }))
       : null,
     (clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'audio')
       ? el('div', { class: 'field kf-field' },
@@ -3091,6 +4132,7 @@ function renderInspector(focusText = false) {
           el('div', { class: 'speed-row' },
             ...KEYFRAME_PROPS.filter((p) => {
               if (p === 'volume') return clip.kind === 'audio' || clip.kind === 'video';
+              if (GRADE_KEYFRAME_PROPS.includes(p)) return clip.kind === 'video' || clip.kind === 'image';
               if (p === 'rotate' || p === 'scale' || p === 'posX' || p === 'posY') {
                 return clip.kind === 'video' || clip.kind === 'image';
               }
@@ -3099,6 +4141,8 @@ function renderInspector(focusText = false) {
               const kfLabels = {
                 scale: '+ Size', posX: '+ Move X', posY: '+ Move Y',
                 rotate: '+ Rotate', opacity: '+ Opacity', volume: '+ Volume',
+                exposure: '+ Exposure', contrast: '+ Contrast',
+                saturation: '+ Saturation', temperature: '+ Temp',
               };
               const kfTips = {
                 scale: 'Animate size over time from this point',
@@ -3107,22 +4151,37 @@ function renderInspector(focusText = false) {
                 rotate: 'Animate rotation (degrees) over time',
                 opacity: 'Animate opacity (transparency) over time',
                 volume: 'Animate volume over time',
+                exposure: 'Animate brightness over time',
+                contrast: 'Animate contrast over time',
+                saturation: 'Animate color intensity over time',
+                temperature: 'Animate warm/cool balance over time',
               };
-              return el('button', {
-                class: 'btn sm',
-                title: kfTips[prop] || `Add ${prop} keyframe at playhead`,
-                text: kfLabels[prop] || `+${prop}`,
+              const label = kfLabels[prop] || prop;
+              const btn = el('button', {
+                class: 'btn sm kf-btn',
+                title: `${kfTips[prop] || `Add ${prop} keyframe`} — click again to remove the key at the playhead`,
+                text: label,
                 onclick: () => apply(() => {
                   const localT = Math.max(0, round3(S.playhead - clip.start));
-                  const cur = currentKfValue(clip, prop, localT);
                   const existing = clip.keyframes?.[prop] || [];
-                  const next = existing.filter((p) => Math.abs(p.t - localT) > 0.001);
-                  next.push({ t: localT, v: cur });
+                  const has = existing.some((p) => Math.abs(Number(p.t) - localT) <= 0.001);
+                  const kf = { ...(clip.keyframes || {}) };
+                  if (has) {
+                    const rest = existing.filter((p) => Math.abs(Number(p.t) - localT) > 0.001);
+                    if (rest.length) kf[prop] = rest; else delete kf[prop];
+                    setClipProps(S.timeline, track.id, clip.id, { keyframes: kf });
+                    toast(`${label.replace(/^\+\s*/, '')} key removed`);
+                    return;
+                  }
+                  const next = [...existing, { t: localT, v: currentKfValue(clip, prop, localT) }];
                   next.sort((a, b) => a.t - b.t);
-                  const kf = { ...(clip.keyframes || {}), [prop]: next };
+                  kf[prop] = next;
                   setClipProps(S.timeline, track.id, clip.id, { keyframes: kf });
+                  toast(`${label.replace(/^\+\s*/, '')} key added @ ${fmtDuration(localT)}`);
                 }),
               });
+              if (S.quickRefs?.kf) S.quickRefs.kf[prop] = btn;
+              return btn;
             }),
             el('button', {
               class: 'btn sm', text: 'Smooth', title: 'Ease all keyframes (spline smooth, like Resolve)',
@@ -3381,6 +4440,62 @@ function renderInspector(focusText = false) {
         el('button', { class: 'btn sm', text: 'No crop (contain)', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { fit: 'contain', scale: 1, posX: 50, posY: 50 })) }),
         el('button', { class: 'btn sm primary', text: 'Make black & white', title: 'Apply black & white color effect', onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { effect: 'bw' })) }),
       ),
+      el('div', { class: 'full insp-sec' }, 'Color grading'),
+      ...GRADE_KEYS.map((key) => {
+        const [lo, hi] = GRADE_RANGES[key];
+        const cur = gradeOf(clip)[key];
+        const out = el('output', { class: 'grade-val', text: cur.toFixed(2) });
+        const rng = el('input', {
+          class: 'input range', type: 'range', min: String(lo), max: String(hi), step: '0.01',
+          value: String(cur), 'aria-label': GRADE_LABELS[key],
+          title: `${GRADE_LABELS[key]} — drag for a live look (undo restores)`,
+        });
+        let snap = null;
+        rng.addEventListener('input', () => {
+          const v = Number(rng.value);
+          if (!snap) snap = cloneTimeline(S.timeline);
+          setClipProps(S.timeline, track.id, clip.id, { grade: { ...gradeOf(clip), [key]: v } });
+          out.textContent = v.toFixed(2);
+          syncMedia(false);
+        });
+        rng.addEventListener('change', () => {
+          if (!snap) return;
+          const s = snap; snap = null;
+          commit(s);
+          renderTimeline(); renderInspector(); updateFooter(); updatePreviewText(true); syncMedia(false);
+          updatePreviewBadges(); flashPreview(); updateSelBox();
+        });
+        return el('label', { class: 'field full grade-field' },
+          el('span', { text: GRADE_LABELS[key] }), rng, out);
+      }),
+      el('div', { class: 'full insp-sec' }, 'Looks'),
+      el('div', { class: 'full style-presets' },
+        ...Object.keys(GRADE_PRESETS).map((name) => {
+          const want = normalizeGrade({ ...DEFAULT_GRADE, ...GRADE_PRESETS[name] });
+          const cur = gradeOf(clip);
+          const isActive = GRADE_KEYS.every((k) => Math.abs((cur[k] || 0) - (want[k] || 0)) < 1e-6);
+          return el('button', {
+            class: isActive ? 'btn sm active' : 'btn sm',
+            text: name.charAt(0).toUpperCase() + name.slice(1),
+            title: isActive ? 'Active look — click Neutral to reset' : `Apply the ${name} look`,
+            onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { grade: want })),
+          });
+        }),
+      ),
+      el('div', { class: 'full', style: 'display:flex;gap:6px;flex-wrap:wrap' },
+        el('button', {
+          class: 'btn sm', text: 'Reset grade', title: 'Neutral color on this clip',
+          onclick: () => apply(() => setClipProps(S.timeline, track.id, clip.id, { grade: { ...DEFAULT_GRADE } })),
+        }),
+        el('button', {
+          class: 'btn sm', text: 'Grade all clips', title: 'Copy this clip\u2019s color grading onto every video/image clip',
+          onclick: () => { const n = gradeAllClips(gradeOf(clip)); if (n) toast(`Grade copied to ${n} clip(s)`); },
+        }),
+        el('button', {
+          class: 'btn sm', text: 'Clear all grades', title: 'Neutral color everywhere',
+          onclick: () => { const n = gradeAllClips({ ...DEFAULT_GRADE }); if (n) toast(`Grades cleared on ${n} clip(s)`); },
+        }),
+      ),
       ...(clip.kind === 'image'
         ? (() => {
             const asset = S.media.find((m) => m.id === clip.assetId);
@@ -3396,6 +4511,13 @@ function renderInspector(focusText = false) {
           })()
         : []),
     );
+    appendSpeedSection(grid, apply, track, clip);
+    appendChromaSection(grid, apply, track, clip);
+    appendMaskSection(grid, apply, track, clip);
+  }
+
+  if (clip.kind === 'audio') {
+    appendSpeedSection(grid, apply, track, clip, false);
   }
 
   if ((clip.kind === 'image' || clip.kind === 'video') && track.id !== 'v1') {
@@ -3412,6 +4534,8 @@ function renderInspector(focusText = false) {
     ),
     el('div', { class: 'muted', style: 'font-size:10.5px;margin-top:8px', text: `Track ${track.id.toUpperCase()} · ${clip.kind}` })
   );
+  refreshQuickStates();
+  S.renderLib?.();
 }
 
 /* ================= save / load / disk sync ================= */
@@ -3490,6 +4614,7 @@ function setPlayhead(t) {
   updatePreviewText();
   updatePreviewBadges();
   updateSelBox();
+  refreshQuickStates(); // keyframe diamonds light up at the playhead
 }
 
 function updateTimeLabel() {
@@ -3621,6 +4746,8 @@ function syncMedia(force) {
       img.classList.add('hidden');
       S.audioEls.forEach((a) => a.pause());
       updatePreviewBadges();
+      syncVignetteLayer();
+      syncFlashLayer();
       syncPhonePreview();
       return;
     }
@@ -3648,14 +4775,19 @@ function syncMedia(force) {
           a.dataset.src = assetA?.url || '';
         }
         const sp = c.speed > 0 ? c.speed : 1;
-        const target = c.srcIn + (t - c.start) * sp;
-        if (Math.abs(a.currentTime - target) > 0.22) {
+        const localT = t - c.start;
+        const curve = speedCurveOf(c);
+        const remapped = !!curve || normalizeReverse(c.reverse);
+        const target = sourceTimeAt(c, localT);
+        if (Math.abs(a.currentTime - target) > (remapped ? 0.05 : 0.22)) {
           try { a.currentTime = target; } catch { /* ignore */ }
         }
-        if (a.playbackRate !== sp) {
-          try { a.playbackRate = sp; } catch { /* ignore */ }
+        const rate = curve
+          ? Math.min(4, Math.max(0.25, curveSpeedAt(curve, Math.min(1, Math.max(0, localT / Math.max(0.001, c.duration))))))
+          : sp;
+        if (a.playbackRate !== rate) {
+          try { a.playbackRate = rate; } catch { /* ignore */ }
         }
-        const localT = t - c.start;
         const volKf = evalKeyframes(c, localT, 'volume', c.volume);
         const gain = fadeGain(c, localT);
         a.volume = Math.min(1, c.muted || track.muted ? 0 : Math.max(0, volKf * gain));
@@ -3668,6 +4800,7 @@ function syncMedia(force) {
   }
   updatePreviewBadges();
   syncVignetteLayer();
+  syncFlashLayer();
   syncOverlays();
   syncPhonePreview();
 }

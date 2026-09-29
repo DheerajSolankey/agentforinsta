@@ -6,7 +6,7 @@ import { assertInsideData } from './paths.js';
 import { run, progressSeconds } from './ffmpeg.js';
 import { probeMedia } from './probe.js';
 import { getSettings, getProject, saveProject, readTimeline, mediaAbsolutePath, getMedia, DIRS, ensureProjectDirs } from './store.js';
-import { validateTimeline, timelineDuration, getTrack, clipEnd, round3, EPS, getLayoutMode, isSplitLayout, splitPanes, normalizeTransform, FIT_MODES, normalizeEffect, bgToFfmpeg, BG_MODES, normalizeTextAnim, normalizeTextAlign, estimateBannerLines, bannerBoxHeight, keyframeExpr, normalizeTransition, normalizeWatermark, staggerWordWindows, estimateWordWidth, staggerWords } from '../shared/timeline-ops.js';
+import { validateTimeline, timelineDuration, getTrack, clipEnd, round3, round6, EPS, getLayoutMode, isSplitLayout, splitPanes, normalizeTransform, FIT_MODES, normalizeEffect, bgToFfmpeg, BG_MODES, normalizeTextAnim, normalizeTextAlign, estimateBannerLines, bannerBoxHeight, keyframeExpr, normalizeTransition, normalizeTransitionDur, normalizeWatermark, staggerWordWindows, estimateWordWidth, staggerWords, gradeOf, GRADE_KEYFRAME_PROPS, speedCurveOf, speedCurveConstant, sourceTimeAt, sourceSpanOf, curveSegments, normalizeReverse, normalizeChroma, normalizeMask, SPEED_CURVE_SEGMENTS } from '../shared/timeline-ops.js';
 import { log } from './logger.js';
 import { captionForProject } from './captions.js';
 
@@ -144,6 +144,322 @@ export function buildEffectFilter(clip) {
     case 'soft': return 'gblur=sigma=1.35';
     default: return '';
   }
+}
+
+/**
+ * Per-clip color grade (exposure / contrast / saturation / temperature / vignette).
+ * Grade channels accept keyframes — `eq` is evaluated per frame when animated.
+ * Returns '' for a neutral grade. Exported for tests.
+ */
+export function buildGradeFilter(clip, { withVignette = true } = {}) {
+  const g = gradeOf(clip);
+  const kf = clip?.keyframes || {};
+  const has = (p) => Array.isArray(kf[p]) && kf[p].length > 0;
+  const animated = GRADE_KEYFRAME_PROPS.some(has);
+  const expr = (p) => (has(p) ? keyframeExpr(kf[p], g[p], 0) : null);
+
+  const exposure = expr('exposure');
+  const contrast = expr('contrast');
+  const sat = expr('saturation');
+  const temp = expr('temperature');
+  const touched = animated
+    || ['exposure', 'contrast', 'saturation', 'temperature'].some((k) => Math.abs(g[k]) > 1e-6);
+
+  const parts = [];
+  if (touched) {
+    const q = (v) => `'${v}'`;
+    const brightness = exposure ? `(${exposure})*0.4` : round3(g.exposure * 0.4);
+    const ct = contrast ? `max(0,1+(${contrast}))` : round3(1 + g.contrast);
+    const sa = sat ? `max(0,1+(${sat}))` : round3(1 + g.saturation);
+    const gr = temp ? `max(0.05,1+(${temp})*0.22)` : round3(1 + g.temperature * 0.22);
+    const gg = temp ? `max(0.05,1+(${temp})*0.02)` : round3(1 + g.temperature * 0.02);
+    const gb = temp ? `max(0.05,1-(${temp})*0.22)` : round3(1 - g.temperature * 0.22);
+    parts.push(
+      `eq=brightness=${q(brightness)}:contrast=${q(ct)}:saturation=${q(sa)}`
+      + `:gamma_r=${q(gr)}:gamma_g=${q(gg)}:gamma_b=${q(gb)}${animated ? ':eval=frame' : ''}`
+    );
+  }
+  if (withVignette && g.vignette > 1e-6) {
+    parts.push(`vignette=angle=${round3((Math.PI / 12) * (1 + 4 * g.vignette))}`);
+  }
+  return parts.join(',');
+}
+
+/** FFmpeg flatten: bake the alpha plane into RGB (masked-out → black) + restore yuv. */
+const FLATTEN_ALPHA = "geq=r='clip(floor(r(X,Y)*alpha(X,Y)/255),0,255)':g='clip(floor(g(X,Y)*alpha(X,Y)/255),0,255)':b='clip(floor(b(X,Y)*alpha(X,Y)/255),0,255)':a='alpha(X,Y)'";
+
+/**
+ * Chroma-key stage (green/blue screen) for a clip. Empty when off.
+ * `format=rgba` is required so `colorkey` can write the key into the alpha plane;
+ * FFmpeg's similarity floor is 1e-5, so 0 is clamped up to it. Exported for tests.
+ */
+export function buildChromaFilter(clip) {
+  const c = normalizeChroma(clip?.chroma);
+  if (!c) return '';
+  const color = `0x${c.color.slice(1)}`;
+  const similarity = Math.max(0.00001, round3(c.similarity));
+  const parts = [`colorkey=color=${color}:similarity=${similarity}:blend=${round3(c.blend)}`];
+  if (c.despill > 0) {
+    // despill only knows green/blue spill — skip for keys where it would do nothing.
+    const type = chromaSpillChannel(c.color);
+    if (type) parts.push(`despill=type=${type}:mix=${round3(c.despill)}`);
+  }
+  return parts.join(',');
+}
+
+/** Dominant channel of a #rrggbb key color → despill type (red keys get none). */
+function chromaSpillChannel(color) {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(String(color || ''));
+  if (!m) return null;
+  const r = parseInt(m[1].slice(0, 2), 16);
+  const g = parseInt(m[1].slice(2, 4), 16);
+  const b = parseInt(m[1].slice(4, 6), 16);
+  if (g >= r && g >= b) return 'green';
+  if (b >= r && b > g) return 'blue';
+  return null;
+}
+
+/** Alpha (0–255) expression for a mask — uses geq's X/Y/W/H variables. */
+function maskAlphaExpr(m) {
+  const x = round3(m.x);
+  const y = round3(m.y);
+  const w = round3(m.w);
+  const h = round3(m.h);
+  const dx = `(X-W*${x}/100)`;
+  const dy = `(Y-H*${y}/100)`;
+  let u = dx;
+  let v = dy;
+  if (Math.abs(m.rotation) > 1e-6) {
+    const r = round3(m.rotation);
+    u = `((${dx})*cos(${r}*PI/180)+(${dy})*sin(${r}*PI/180))`;
+    v = `((${dy})*cos(${r}*PI/180)-(${dx})*sin(${r}*PI/180))`;
+  }
+  const rx = `(W*${w}/200)`;
+  const ry = `(H*${h}/200)`;
+  let d;
+  switch (m.type) {
+    case 'line': // thickness = w (% of width), runs through the centre at `rotation`
+      d = `abs(${v})/${rx}`;
+      break;
+    case 'circle':
+      d = `hypot(${u},${v})/min(${rx},${ry})`;
+      break;
+    case 'rect':
+      d = `max(abs(${u})/${rx},abs(${v})/${ry})`;
+      break;
+    default: // ellipse
+      d = `sqrt(pow((${u})/${rx},2)+pow((${v})/${ry},2))`;
+      break;
+  }
+  const feather = round3(m.feather);
+  // feather ramps 255→0 across ±feather of the shape radius, centred on the edge.
+  let a = feather > 0 ? `clip((1+${feather}-(${d}))/(2*${feather}),0,1)*255` : `if(lt(${d},1),255,0)`;
+  if (m.invert) a = `255-(${a})`;
+  return `clip(floor(${a}),0,255)`;
+}
+
+/**
+ * Matte (rect / ellipse / circle / line) for a clip, geq on rgba.
+ * `flatten: true` (program path) premultiplies RGB by the resulting alpha so the
+ * matte burns to black once the alpha plane is dropped; `flatten: false`
+ * (overlay path) keeps alpha for compositing. Combines with an upstream
+ * `colorkey` alpha via `alpha(X,Y)`. Exported for tests.
+ */
+export function buildMaskFilter(clip, { flatten = true, outFormat = null } = {}) {
+  const m = normalizeMask(clip?.mask);
+  if (!m) return '';
+  const expr = maskAlphaExpr(m);
+  const rgb = flatten
+    ? ['r', 'g', 'b'].map((ch) => `${ch}='clip(floor(${ch}(X,Y)*alpha(X,Y)*(${expr})/65025),0,255)'`).join(':')
+    : "r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'";
+  const parts = ['format=rgba', `geq=${rgb}:a='clip(floor(alpha(X,Y)*(${expr})/255),0,255)'`];
+  const fmt = flatten ? (outFormat ?? 'yuv420p') : null;
+  if (fmt) parts.push(`format=${fmt}`);
+  return parts.join(',');
+}
+
+/**
+ * chroma key + matte as a single self-contained stage (input format in, yuv out).
+ * Empty when both are off. Exported so tests/probes compose it exactly as exports do.
+ */
+export function buildKeyMaskStage(clip, { flatten = true, outFormat = null } = {}) {
+  const chroma = buildChromaFilter(clip);
+  const hasMask = !!normalizeMask(clip?.mask);
+  if (!chroma && !hasMask) return '';
+  const parts = [];
+  if (chroma) parts.push('format=rgba', chroma);
+  if (hasMask) parts.push(buildMaskFilter(clip, { flatten, outFormat }));
+  else if (chroma && flatten) parts.push(FLATTEN_ALPHA, `format=${outFormat ?? 'yuv420p'}`);
+  return parts.filter(Boolean).join(',');
+}
+
+/**
+ * Source windows a speed-curve clip is split into on export.
+ * Lowered from SPEED_CURVE_SEGMENTS for short clips so every window still spans
+ * ~2 source frames at the curve's slowest speed (empty windows break `concat`).
+ */
+export function curveSegmentCount(clip, fps = 30) {
+  const dur = Number(clip?.duration) || 0;
+  const F = Number(fps) > 0 ? Number(fps) : 30;
+  const curve = speedCurveOf(clip);
+  if (!curve) return 1;
+  const minV = Math.min(...curve.points.map((p) => p.v));
+  const fits = Math.floor((dur * minV * F) / 2);
+  return Math.max(1, Math.min(SPEED_CURVE_SEGMENTS, fits));
+}
+
+/**
+ * filter_complex chains retiming `[inLabel]` through a speed curve → `[outLabel]`.
+ * `inLabel`/`outLabel` are bare pad names (`'0:v'`, `'rt'`) — brackets are added here.
+ * split → per-window trim + linear retime + fps → concat. Returns an array of
+ * chains (join with ';'). Exported for tests.
+ */
+export function buildSpeedCurveGraph(clip, fps = 30, { inLabel = '0:v', outLabel = 'rt' } = {}) {
+  const dur = Number(clip?.duration) || 0;
+  const srcIn = Number.isFinite(Number(clip?.srcIn)) ? Number(clip.srcIn) : 0;
+  const N = curveSegmentCount(clip, fps);
+  const F = round3(Number(fps) > 0 ? Number(fps) : 30);
+  const segs = curveSegments(clip, N);
+  if (!(dur > 0) || !segs.length) return [`[${inLabel}]null[${outLabel}]`];
+  if (N <= 1) {
+    // Too short to split: one constant retime at the curve's average speed.
+    const avg = round6(sourceSpanOf(clip) / dur);
+    return [`[${inLabel}]setpts=PTS/${avg || 1}[${outLabel}]`];
+  }
+  const chains = [`[${inLabel}]split=${N}${segs.map((_, i) => `[cs${i}]`).join('')}`];
+  segs.forEach((s, i) => {
+    const a = round6(s.sa - srcIn);
+    const b = round6(s.sb - srcIn);
+    chains.push(`[cs${i}]trim=start=${a}:end=${b},setpts=(PTS-STARTPTS)/${s.speed},fps=${F}[cb${i}]`);
+  });
+  chains.push(`${segs.map((_, i) => `[cb${i}]`).join('')}concat=n=${N}:v=1:a=0[${outLabel}]`);
+  return chains;
+}
+
+/**
+ * Audio twin of buildSpeedCurveGraph (aresample → asplit → atrim → varispeed → concat);
+ * bare pad names. Exported for tests.
+ *
+ * Per branch it retimes with `asetrate=48000*speed,aresample=48000` rather than
+ * `atempo`: atempo's WSOLA flush drops ~13 ms per stage (probed: a 12-branch curve
+ * came out 2.762s instead of 3.000s), while varispeed is sample-exact (2.9996s).
+ * Trade-off: on curve clips pitch follows speed; constant-speed clips still go
+ * through atempoChain (pitch preserved).
+ */
+export function buildSpeedCurveAudioGraph(clip, fps = 30, { inLabel = '0:a', outLabel = 'ac' } = {}) {
+  const dur = Number(clip?.duration) || 0;
+  const srcIn = Number.isFinite(Number(clip?.srcIn)) ? Number(clip.srcIn) : 0;
+  const N = curveSegmentCount(clip, fps);
+  const segs = curveSegments(clip, N);
+  if (!(dur > 0) || !segs.length) return [`[${inLabel}]anull[${outLabel}]`];
+  if (N <= 1) {
+    // Too short to split: one varispeed retime at the curve's average speed.
+    const avg = round6(sourceSpanOf(clip) / dur) || 1;
+    return [`[${inLabel}]aresample=48000,asetrate=48000*${avg},aresample=48000[${outLabel}]`];
+  }
+  // Normalize the rate once so `asetrate=48000*speed` is meaningful.
+  const chains = [`[${inLabel}]aresample=48000,asplit=${N}${segs.map((_, i) => `[as${i}]`).join('')}`];
+  segs.forEach((s, i) => {
+    const a = round6(s.sa - srcIn);
+    const b = round6(s.sb - srcIn);
+    chains.push(`[as${i}]atrim=start=${a}:end=${b},asetpts=PTS-STARTPTS,asetrate=48000*${s.speed},aresample=48000[ab${i}]`);
+  });
+  chains.push(`${segs.map((_, i) => `[ab${i}]`).join('')}concat=n=${N}:v=0:a=1[${outLabel}]`);
+  return chains;
+}
+
+/** Transition / opacity alpha filters for a clip (runs after the retime stage). */
+function buildAlphaFilters(clip) {
+  const opacityKfs = clip.keyframes?.opacity;
+  const tr = normalizeTransition(clip.transitionIn);
+  const tdur = normalizeTransitionDur(clip.transitionDur);
+  const alpha = [];
+    if (tr !== 'none') {
+      if (tr === 'flash') alpha.push(`fade=t=in:st=0:d=${tdur}:color=white`);
+    else if (tr === 'fade' || tr === 'dip') alpha.push(`fade=t=in:st=0:d=${tdur}`);
+    else alpha.push(`fade=t=in:st=0:d=${round3(Math.min(tdur, 0.3) * 0.5)}`);
+  }
+  if (Array.isArray(opacityKfs) && opacityKfs.length) {
+    // Local t (after retime) → clip-local times; bake opacity toward black on yuv.
+    alpha.push(`geq=y='clip(floor(lum(X,Y)*(${keyframeExpr(opacityKfs, 1, 0)})),0,255)':cb='cb(X,Y)':cr='cr(X,Y)'`);
+  }
+  return alpha;
+}
+
+/**
+ * argv for encoding one media clip to a pane/full-frame intermediate.
+ * Exported so tests and probes exercise the exact args a render uses.
+ * Order: [curve graph] → reverse → chroma/mask → fit → rotate → effect
+ *        → setpts (speed) → grade → opacity/transition → fps/format.
+ */
+export function buildClipPrepArgs(clip, { path, w, h, fps = 30, crf = '18' } = {}) {
+  const F = Number(fps) > 0 ? Number(fps) : 30;
+  const pw = Math.max(2, Number(w) || 2);
+  const ph = Math.max(2, Number(h) || 2);
+  const curve = speedCurveOf(clip);
+  const flatV = curve ? speedCurveConstant(curve) : null;
+  // A speed curve overrides the constant speed; a flat curve degrades to it.
+  const speed = flatV ?? (Number(clip.speed) > 0 ? Number(clip.speed) : 1);
+  const useGraph = !!curve && flatV == null && clip.kind !== 'image';
+  const srcDur = Math.max(0.05, curve ? sourceSpanOf(clip) : clip.duration * speed);
+  const reverseF = clip.kind !== 'image' && normalizeReverse(clip.reverse) ? 'reverse' : '';
+  const mid = [];
+  if (clip.kind !== 'image' && !useGraph && speed !== 1) mid.push(`setpts=PTS/${speed}`);
+  if (reverseF && !useGraph) mid.push(reverseF);
+  const chain = [
+    buildKeyMaskStage(clip, { flatten: true, outFormat: 'yuv420p' }),
+    buildFitFilter(clip, pw, ph),
+    buildRotateFilter(clip),
+    buildEffectFilter(clip),
+    ...mid,
+    buildGradeFilter(clip),
+    ...buildAlphaFilters(clip),
+  ].filter(Boolean).join(',');
+  const vf = `${chain},fps=${F},setsar=1,format=yuv420p`;
+  const common = ['-an', '-r', String(F), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf)];
+  if (useGraph) {
+    const graph = buildSpeedCurveGraph(clip, F, { inLabel: '0:v', outLabel: 'rc' });
+    const body = [...graph, `[rc]${reverseF ? `${reverseF},` : ''}${vf}[vout]`];
+    return ['-y', '-ss', String(clip.srcIn), '-t', String(srcDur), '-i', path,
+      '-filter_complex', body.join(';'), '-map', '[vout]', ...common];
+  }
+  return ['-y',
+    ...(clip.kind === 'image'
+      ? ['-loop', '1', '-t', String(clip.duration)]
+      : ['-ss', String(clip.srcIn), '-t', String(srcDur)]),
+    '-i', path, '-vf', vf, ...common];
+}
+
+/** argv for encoding one clip's audio to the intermediate wav. Exported for tests/probes. */
+export function buildWavArgs(clip, { path, out, fps = 30 } = {}) {
+  const F = Number(fps) > 0 ? Number(fps) : 30;
+  const curve = speedCurveOf(clip);
+  const flatV = curve ? speedCurveConstant(curve) : null;
+  const speed = flatV ?? (Number(clip.speed) > 0 ? Number(clip.speed) : 1);
+  const useGraph = !!curve && flatV == null;
+  const srcDur = Math.max(0.05, curve ? sourceSpanOf(clip) : clip.duration * speed);
+  const af = [];
+  if (!useGraph && speed !== 1) af.push(...atempoChain(speed));
+  if (normalizeReverse(clip.reverse)) af.push('areverse');
+  const volKfs = clip.keyframes?.volume;
+  if (Array.isArray(volKfs) && volKfs.length) {
+    // After atempo, timeline local t starts at 0 for this wav.
+    af.push(`volume=volume='${keyframeExpr(volKfs, clip.volume, 0)}':eval=frame`);
+  } else {
+    af.push(`volume=${clip.volume}`);
+  }
+  const fi = Math.max(0, Number(clip.fadeIn) || 0);
+  const fo = Math.max(0, Number(clip.fadeOut) || 0);
+  if (fi > 0) af.push(`afade=t=in:st=0:d=${round3(fi)}`);
+  if (fo > 0) af.push(`afade=t=out:st=${round3(Math.max(0, clip.duration - fo))}:d=${round3(fo)}`);
+  const io = ['-y', '-ss', String(clip.srcIn), '-t', String(srcDur), '-i', path];
+  const outArgs = ['-ac', '2', '-ar', '48000', '-c:a', 'pcm_s16le', out];
+  if (useGraph) {
+    // Curve: segmented retiming first, then reverse / volume / fades.
+    const body = [...buildSpeedCurveAudioGraph(clip, F, { inLabel: '0:a', outLabel: 'ac' }), `[ac]${af.join(',')}[ao]`];
+    return [...io, '-filter_complex', body.join(';'), '-map', '[ao]', ...outArgs];
+  }
+  return [...io, '-af', af.join(','), ...outArgs];
 }
 
 /**
@@ -396,6 +712,9 @@ const STAGE_WEIGHTS = [
   ['outputs', 5],
 ];
 
+/** Reverse clips above this source span log a WARN (ffmpeg buffers every frame). */
+const REVERSE_WARN_SECONDS = 30;
+
 /**
  * Render a project.
  * quality: 'preview' (fast/low quality) | 'final'
@@ -454,6 +773,19 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
 
     /* --- media prep --- */
     beginStage('media_prep');
+    for (const tlTrack of timeline.tracks) {
+      for (const clip of tlTrack.clips) {
+        if (!normalizeReverse(clip.reverse)) continue;
+        const span = sourceSpanOf(clip);
+        if (span > REVERSE_WARN_SECONDS) {
+          // `reverse` buffers every frame of the clip — warn, never fail.
+          log({
+            job: projectId, stage: 'media_prep', status: 'WARN', clip: clip.id,
+            message: `Reversing ${round3(span)}s of source for clip ${clip.id} — long reverses buffer every frame in memory.`,
+          });
+        }
+      }
+    }
     const inputArgs = [];      // shared input list for composite
     const segmentInputs = [];  // { kind: 'file'|'lavfi', index }
     let inputCount = 0;
@@ -465,35 +797,8 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
       const pw = Math.max(2, pane ? pane.w : W);
       const ph = Math.max(2, pane ? pane.h : H);
       const inter = join(workDir, `pane-${tag}-${clip.id}.mp4`);
-      const speed = Number(clip.speed) > 0 ? Number(clip.speed) : 1;
-      const srcDur = Math.max(0.05, clip.duration * speed);
-      const fit = buildFitFilter(clip, pw, ph);
-      const rot = buildRotateFilter(clip);
-      const fx = buildEffectFilter(clip);
-      const opacityKfs = clip.keyframes?.opacity;
-      const tr = normalizeTransition(clip.transitionIn);
-      let alpha = '';
-      if (Array.isArray(opacityKfs) && opacityKfs.length) {
-        // Local t (after setpts) → clip-local times; bake opacity toward black on yuv.
-        alpha = `,geq=y='clip(floor(lum(X,Y)*(${keyframeExpr(opacityKfs, 1, 0)})),0,255)':cb='cb(X,Y)':cr='cr(X,Y)'`;
-      } else if (tr !== 'none') {
-        const d = 0.3;
-        if (tr === 'flash') alpha = `,fade=t=in:st=0:d=${d}:color=white`;
-        else if (tr === 'fade' || tr === 'dip') alpha = `,fade=t=in:st=0:d=${d}`;
-        else if (tr === 'zoom' || tr === 'slide') alpha = `,fade=t=in:st=0:d=0.15`;
-      }
-      // Order: fit → rotate → effect → setpts (speed) → opacity/transition → fps/format.
-      const mid = [];
-      if (clip.kind !== 'image' && speed !== 1) mid.push(`setpts=PTS/${speed}`);
-      const chain = [fit, rot, fx, ...mid].filter(Boolean).join(',') + alpha;
-      const vf = `${chain},fps=${FPS},setsar=1,format=yuv420p`;
-      const args =
-        clip.kind === 'image'
-          ? ['-y', '-loop', '1', '-t', String(clip.duration), '-i', path, '-an',
-             '-vf', vf, '-r', String(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', crfPrep, inter]
-          : ['-y', '-ss', String(clip.srcIn), '-t', String(srcDur), '-i', path, '-an',
-             '-vf', vf, '-r', String(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', crfPrep, inter];
-      await run(ffmpegBin, args, { timeoutMs: settings.jobTimeoutMs, signal });
+      const args = buildClipPrepArgs(clip, { path, w: pw, h: ph, fps: FPS, crf: crfPrep });
+      await run(ffmpegBin, [...args, inter], { timeoutMs: settings.jobTimeoutMs, signal });
       return inter;
     };
 
@@ -552,26 +857,9 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
     const audioPlan = []; // { inputIndex, start, }
     const pushWav = async (clip, assetPath, label) => {
       const wav = join(workDir, `aud-${label}-${clip.id}.wav`);
-      const speed = Number(clip.speed) > 0 ? Number(clip.speed) : 1;
-      const srcDur = Math.max(0.05, clip.duration * speed);
-      const af = [];
-      if (speed !== 1) af.push(...atempoChain(speed));
-      const volKfs = clip.keyframes?.volume;
-      if (Array.isArray(volKfs) && volKfs.length) {
-        // After atempo, timeline local t starts at 0 for this wav.
-        af.push(`volume=volume='${keyframeExpr(volKfs, clip.volume, 0)}':eval=frame`);
-      } else {
-        af.push(`volume=${clip.volume}`);
-      }
-      const fi = Math.max(0, Number(clip.fadeIn) || 0);
-      const fo = Math.max(0, Number(clip.fadeOut) || 0);
-      if (fi > 0) af.push(`afade=t=in:st=0:d=${round3(fi)}`);
-      if (fo > 0) af.push(`afade=t=out:st=${round3(Math.max(0, clip.duration - fo))}:d=${round3(fo)}`);
-      await run(ffmpegBin, [
-        '-y', '-ss', String(clip.srcIn), '-t', String(srcDur), '-i', assetPath,
-        '-af', af.join(','),
-        '-ac', '2', '-ar', '48000', '-c:a', 'pcm_s16le', wav,
-      ], { timeoutMs: settings.jobTimeoutMs, signal });
+      await run(ffmpegBin, buildWavArgs(clip, { path: assetPath, out: wav, fps: FPS }), {
+        timeoutMs: settings.jobTimeoutMs, signal,
+      });
       inputArgs.push('-i', wav);
       audioPlan.push({ index: inputCount++, start: clip.start });
     };
@@ -607,15 +895,25 @@ export async function renderProject({ projectId, quality = 'final', onProgress =
       const ov = clip.overlay || { xPct: 50, yPct: 50, widthPct: 30 };
       const targetW = Math.max(16, Math.round((W * ov.widthPct) / 100));
       const idx = inputCount++;
+      // Look pipeline: format=rgba → rotate (transparent fill) → grade → alpha fade.
+      // Color *effects* are skipped here: several of them (hue/colorbalance/gblur)
+      // drop the alpha channel and would turn a PiP into an opaque rectangle.
+      const rot = buildRotateFilter(clip)?.replace('fillcolor=black', 'fillcolor=#00000000') || '';
+      const grade = buildGradeFilter(clip, { withVignette: false });
+      const tr = normalizeTransition(clip.transitionIn);
+      const tdur = normalizeTransitionDur(clip.transitionDur);
+      const fadeIn = tr !== 'none' ? `fade=t=in:alpha=1:st=0:d=${tdur}` : '';
+      // Head runs on rgba so chroma keying and the matte keep their alpha.
+      const head = ['format=rgba', buildChromaFilter(clip), buildMaskFilter(clip, { flatten: false }), rot, grade, fadeIn].filter(Boolean).join(',');
       if (clip.kind === 'image') {
         inputArgs.push('-loop', '1', '-t', String(clip.duration), '-i', path);
         filters.push(
-          `[${idx}:v]scale=${targetW}:-2,format=rgba,fps=${FPS},setsar=1,setpts=PTS-STARTPTS+${clip.start}/TB[ov${idx}]`
+          `[${idx}:v]scale=${targetW}:-2,${head},fps=${FPS},setsar=1,setpts=PTS-STARTPTS+${clip.start}/TB[ov${idx}]`
         );
       } else {
         inputArgs.push('-ss', String(clip.srcIn), '-t', String(clip.duration), '-i', path);
         filters.push(
-          `[${idx}:v]trim=0:${clip.duration},setpts=PTS-STARTPTS,scale=${targetW}:-2,format=rgba,fps=${FPS},setsar=1,setpts=PTS+${clip.start}/TB[ov${idx}]`
+          `[${idx}:v]trim=0:${clip.duration},setpts=PTS-STARTPTS,scale=${targetW}:-2,${head},fps=${FPS},setsar=1,setpts=PTS+${clip.start}/TB[ov${idx}]`
         );
       }
       filters.push(
@@ -1156,13 +1454,12 @@ export async function frameAt(projectId, seconds, outFile) {
         return outFile;
       }
       const clip = seg.clip;
-      const sp = clip.speed > 0 ? clip.speed : 1;
-      const at = clip.srcIn + (seconds - cursor) * sp;
+      const at = sourceTimeAt(clip, seconds - cursor);
       const asset = getMedia(clip.assetId);
       const path = mediaAbsolutePath(asset);
       await run(resolveFfmpeg(settings), [
         '-y', '-ss', String(at), '-i', path, '-frames:v', '1',
-        '-vf', [buildFitFilter(clip, 1080, 1920), buildRotateFilter(clip), buildEffectFilter(clip)].filter(Boolean).join(','),
+        '-vf', [buildKeyMaskStage(clip, { flatten: true, outFormat: 'yuv420p' }), buildFitFilter(clip, 1080, 1920), buildRotateFilter(clip), buildEffectFilter(clip), buildGradeFilter(clip)].filter(Boolean).join(','),
         '-q:v', '4', outFile,
       ], { timeoutMs: 30000 });
       return outFile;

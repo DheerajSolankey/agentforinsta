@@ -20,10 +20,15 @@ export function requestRender(projectId, quality = 'final') {
   const project = getProject(projectId);
   if (!project) return { status: 'error', error: 'Project not found' };
 
-  if (project.renderJob && (project.renderJob.status === 'processing' || project.renderJob.status === 'queued')) {
-    if (project.renderJob.projectId === projectId || active?.projectId === projectId || waiting.some((w) => w.projectId === projectId)) {
-      return { status: 'already_running', job: project.renderJob };
-    }
+  // Only treat the persisted job as running if THIS process knows about it.
+  // After a server restart the job record can be orphaned at "processing" forever,
+  // which would block every future render for the project.
+  const runningHere = (active && active.projectId === projectId)
+    || waiting.some((w) => w.projectId === projectId);
+  if (project.renderJob
+    && (project.renderJob.status === 'processing' || project.renderJob.status === 'queued')
+    && runningHere) {
+    return { status: 'already_running', job: project.renderJob };
   }
 
   const job = {

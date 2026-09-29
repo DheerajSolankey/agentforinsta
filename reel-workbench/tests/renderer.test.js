@@ -5,8 +5,13 @@ import {
   videoClipAudios, buildSrt, validateForRender, RenderError, atempoChain,
   splitPaneClipsOf, buildFitFilter, buildEffectFilter, buildRotateFilter,
   buildTextAlpha, buildTextX, buildTextY,
+  buildChromaFilter, buildMaskFilter, buildKeyMaskStage, curveSegmentCount,
+  buildSpeedCurveGraph, buildSpeedCurveAudioGraph, buildClipPrepArgs, buildWavArgs,
 } from '../server/renderer.js';
-import { createTimeline, addClip, timelineDuration, round3, setLayoutMode } from '../shared/timeline-ops.js';
+import {
+  createTimeline, addClip, timelineDuration, round3, setLayoutMode,
+  makeClip, SPEED_CURVE_PRESETS, sourceSpanOf,
+} from '../shared/timeline-ops.js';
 
 function tl() {
   return createTimeline({ width: 1080, height: 1920, fps: 30 });
@@ -255,3 +260,200 @@ function getTrackHidden(t, id, hidden) {
   const tr = t.tracks.find((x) => x.id === id);
   tr.hidden = hidden;
 }
+
+const SLOMO = SPEED_CURVE_PRESETS.sloMo;
+const RECT = { type: 'rect', x: 50, y: 50, w: 60, h: 60, feather: 0, rotation: 0, invert: false };
+
+test('buildChromaFilter: colorkey + optional despill with similarity floor', () => {
+  assert.equal(buildChromaFilter({}), '');
+  assert.equal(buildChromaFilter({ chroma: null }), '');
+  assert.equal(buildChromaFilter({ chroma: { color: '#00ff00', similarity: 0.3, blend: 0.15 } }),
+    'colorkey=color=0x00ff00:similarity=0.3:blend=0.15');
+  // ffmpeg rejects similarity=0 (out of range) → clamp to its floor
+  assert.equal(buildChromaFilter({ chroma: { color: '#00ff00', similarity: 0, blend: 0 } }),
+    'colorkey=color=0x00ff00:similarity=0.00001:blend=0');
+  assert.equal(buildChromaFilter({ chroma: { color: '#00ff00', similarity: 0.3, blend: 0.15, despill: 0.6 } }),
+    'colorkey=color=0x00ff00:similarity=0.3:blend=0.15,despill=type=green:mix=0.6');
+  const blue = buildChromaFilter({ chroma: { color: '#0000ff', similarity: 0.3, blend: 0.15, despill: 0.6 } });
+  assert.ok(blue.endsWith('despill=type=blue:mix=0.6'), blue);
+  // red keys have no despill channel → despill skipped
+  assert.equal(buildChromaFilter({ chroma: { color: '#ff0000', similarity: 0.3, blend: 0.15, despill: 0.6 } }),
+    'colorkey=color=0xff0000:similarity=0.3:blend=0.15');
+});
+
+test('buildMaskFilter: flatten burns to black, overlay keeps alpha', () => {
+  assert.equal(buildMaskFilter({}), '');
+  assert.equal(buildMaskFilter({ mask: null }), '');
+
+  const flat = buildMaskFilter({ mask: RECT });
+  assert.ok(flat.startsWith('format=rgba,geq='), flat);
+  assert.ok(flat.includes("r='clip(floor(r(X,Y)*alpha(X,Y)*"), 'RGB scaled by matte');
+  assert.ok(flat.includes("a='clip(floor(alpha(X,Y)*"), 'matte written to alpha');
+  assert.ok(flat.includes('max(abs('), 'rect uses chebyshev distance');
+  assert.ok(flat.includes('if(lt('), 'feather 0 → hard edge');
+  assert.ok(flat.endsWith(',format=yuv420p'), flat);
+
+  const overlay = buildMaskFilter({ mask: RECT }, { flatten: false });
+  assert.ok(overlay.startsWith('format=rgba,geq='), overlay);
+  assert.ok(overlay.includes("r='r(X,Y)'"), 'RGB passthrough in overlay mode');
+  assert.ok(!overlay.includes(',format='), 'no flatten/format suffix', overlay);
+
+  assert.ok(buildMaskFilter({ mask: { ...RECT, type: 'circle' } }).includes('hypot('));
+  assert.ok(buildMaskFilter({ mask: { ...RECT, type: 'line' } }).includes('abs('));
+  assert.ok(buildMaskFilter({ mask: { ...RECT, type: 'ellipse' } }).includes('sqrt('));
+  assert.ok(buildMaskFilter({ mask: { ...RECT, rotation: 45 } }).includes('cos(45*PI/180)'));
+  assert.ok(buildMaskFilter({ mask: { ...RECT, rotation: 45 } }).includes('sin(45*PI/180)'));
+  assert.ok(buildMaskFilter({ mask: { ...RECT, invert: true } }).includes('255-('));
+  assert.ok(buildMaskFilter({ mask: { ...RECT, type: 'ellipse', feather: 0.5 } }).includes('/(2*0.5)'));
+});
+
+test('buildKeyMaskStage: chroma / mask / both / neither', () => {
+  assert.equal(buildKeyMaskStage({}), '');
+  assert.equal(buildKeyMaskStage({ chroma: null, mask: null }), '');
+
+  const chroma = buildKeyMaskStage({ chroma: { color: '#00ff00', similarity: 0.3, blend: 0.15, despill: 0 } });
+  assert.ok(chroma.startsWith('format=rgba,colorkey='), chroma);
+  assert.ok(chroma.includes("geq=r='clip(floor(r(X,Y)*alpha(X,Y)/255),0,255)'"), 'key flattened to yuv');
+  assert.ok(chroma.includes("a='alpha(X,Y)'"), chroma);
+  assert.ok(chroma.endsWith('format=yuv420p'), chroma);
+
+  const mask = buildKeyMaskStage({ mask: RECT });
+  assert.ok(mask.startsWith('format=rgba,geq='), mask);
+  assert.ok(mask.endsWith('format=yuv420p'), mask);
+
+  const both = buildKeyMaskStage({ chroma: { color: '#00ff00', similarity: 0.3, blend: 0.15, despill: 0 }, mask: RECT });
+  assert.ok(both.includes('colorkey=') && both.includes('geq='), both);
+  assert.ok(both.indexOf('colorkey=') < both.indexOf('geq='), 'key before matte');
+
+  // overlay mode keeps alpha (no yuv flatten)
+  const overlay = buildKeyMaskStage({ chroma: { color: '#00ff00', similarity: 0.3, blend: 0.15, despill: 0 } }, { flatten: false });
+  assert.ok(overlay.startsWith('format=rgba,colorkey='), overlay);
+  assert.ok(!overlay.includes(',format=yuv420p'), overlay);
+});
+
+test('curveSegmentCount clamps N for short clips', () => {
+  assert.equal(curveSegmentCount({ duration: 3 }), 1); // no curve → constant retime
+  assert.equal(curveSegmentCount({ duration: 3, speedCurve: { preset: 'sloMo', points: SLOMO } }, 30), 12);
+  assert.equal(curveSegmentCount({ duration: 1, speedCurve: { preset: 'sloMo', points: SLOMO } }, 30), 5);
+  assert.equal(curveSegmentCount({ duration: 0.2, speedCurve: { preset: 'sloMo', points: SLOMO } }, 30), 1);
+  assert.equal(curveSegmentCount({ duration: 0.1, speedCurve: { preset: 'sloMo', points: SLOMO } }, 30), 1);
+  assert.equal(curveSegmentCount({ duration: 3, speedCurve: { preset: 'sloMo', points: SLOMO } }, 1), 1); // fps knob
+  assert.equal(curveSegmentCount({ duration: 3, speedCurve: SPEED_CURVE_PRESETS.constant }, 30), 1); // flat curve
+});
+
+test('buildSpeedCurveGraph: split → trim/retime/fps → concat', () => {
+  const clip = makeClip({ kind: 'video', duration: 3, srcIn: 0, speedCurve: { preset: 'sloMo', points: SLOMO } });
+  const g = buildSpeedCurveGraph(clip, 30);
+  assert.equal(g.length, 14); // split + 12 branches + concat
+  assert.equal(g[0], '[0:v]split=12[cs0][cs1][cs2][cs3][cs4][cs5][cs6][cs7][cs8][cs9][cs10][cs11]');
+  assert.match(g[1], /^\[cs0\]trim=start=0:end=[\d.]+,setpts=\(PTS-STARTPTS\)\/[\d.]+,fps=30\[cb0\]$/);
+  assert.match(g[g.length - 1],
+    /^\[cb0\].*concat=n=12:v=1:a=0\[rt\]$/);
+
+  // trim windows are srcIn-relative and contiguous
+  const bounds = g.slice(1, g.length - 1).map((s) => [
+    parseFloat(/start=([\d.]+)/.exec(s)[1]),
+    parseFloat(/end=([\d.]+)/.exec(s)[1]),
+  ]);
+  assert.equal(bounds[0][0], 0);
+  for (let i = 1; i < bounds.length; i++) assert.equal(bounds[i][0], bounds[i - 1][1]);
+
+  // srcIn offsets the whole window, last edge = sourceSpanOf
+  const shifted = makeClip({ kind: 'video', duration: 2, srcIn: 0.5, speedCurve: { preset: 'sloMo', points: SLOMO } });
+  const sg = buildSpeedCurveGraph(shifted, 30);
+  assert.equal(sg.length, 12); // 10 branches (floor(2*0.35*30/2))
+  const sBounds = sg.slice(1, sg.length - 1).map((s) => parseFloat(/end=([\d.]+)/.exec(s)[1]));
+  assert.equal(round3(sBounds[sBounds.length - 1]), round3(sourceSpanOf(shifted)));
+
+  // label plumbing
+  const custom = buildSpeedCurveGraph(clip, 30, { inLabel: '3:v', outLabel: 'zz' });
+  assert.ok(custom[0].startsWith('[3:v]split=12'), custom[0]);
+  assert.ok(custom[custom.length - 1].endsWith('[zz]'));
+
+  // short clip → single constant retime, no split/concat
+  const tiny = makeClip({ kind: 'video', duration: 0.1, speedCurve: { preset: 'sloMo', points: SLOMO } });
+  const one = buildSpeedCurveGraph(tiny, 30);
+  assert.equal(one.length, 1);
+  assert.match(one[0], /^\[0:v\]setpts=PTS\/[\d.]+\[rt\]$/);
+});
+
+test('buildSpeedCurveAudioGraph: varispeed branches, never atempo', () => {
+  const clip = makeClip({ kind: 'video', duration: 3, speedCurve: { preset: 'sloMo', points: SLOMO } });
+  const g = buildSpeedCurveAudioGraph(clip, 30);
+  assert.equal(g.length, 14);
+  assert.equal(g[0], '[0:a]aresample=48000,asplit=12[as0][as1][as2][as3][as4][as5][as6][as7][as8][as9][as10][as11]');
+  assert.match(g[1],
+    /^\[as0\]atrim=start=0:end=[\d.]+,asetpts=PTS-STARTPTS,asetrate=48000\*[\d.]+,aresample=48000\[ab0\]$/);
+  assert.match(g[g.length - 1], /\[ab0\].*concat=n=12:v=0:a=1\[ac\]$/);
+  assert.ok(!g.join(';').includes('atempo'), 'curves retime with asetrate, not atempo');
+
+  const tiny = makeClip({ kind: 'video', duration: 0.1, speedCurve: { preset: 'sloMo', points: SLOMO } });
+  const one = buildSpeedCurveAudioGraph(tiny, 30);
+  assert.equal(one.length, 1);
+  assert.match(one[0], /^\[0:a\]aresample=48000,asetrate=48000\*[\d.]+,aresample=48000\[ac\]$/);
+});
+
+test('buildClipPrepArgs: plain vs curve vs image argv', () => {
+  const plainClip = makeClip({ kind: 'video', duration: 1, srcIn: 0.5, speed: 2 });
+  const plain = buildClipPrepArgs(plainClip, { path: 'in.mp4', w: 320, h: 240, fps: 30 });
+  assert.ok(plain.includes('-vf'));
+  assert.ok(!plain.includes('-filter_complex'));
+  assert.equal(plain[plain.indexOf('-ss') + 1], '0.5');
+  assert.equal(plain[plain.indexOf('-t') + 1], '2'); // duration * speed of source time
+  const vf = plain[plain.indexOf('-vf') + 1];
+  assert.ok(vf.includes('setpts=PTS/2'), vf);
+  assert.ok(vf.endsWith('fps=30,setsar=1,format=yuv420p'), vf);
+
+  const rev = buildClipPrepArgs(makeClip({ kind: 'video', duration: 1, speed: 2, reverse: true }),
+    { path: 'in.mp4', w: 320, h: 240, fps: 30 });
+  assert.ok(rev[rev.indexOf('-vf') + 1].includes('setpts=PTS/2,reverse'), 'reverse after retime');
+
+  const curveClip = makeClip({
+    kind: 'video', duration: 3, srcIn: 0, reverse: true,
+    speedCurve: { preset: 'sloMo', points: SLOMO },
+    chroma: { color: '#00ff00', similarity: 0.3, blend: 0.15, despill: 0 },
+    mask: RECT,
+  });
+  const curve = buildClipPrepArgs(curveClip, { path: 'in.mp4', w: 320, h: 240, fps: 30 });
+  assert.ok(curve.includes('-filter_complex'));
+  assert.ok(curve.includes('-map') && curve.includes('[vout]'));
+  assert.ok(!curve.includes('-vf'));
+  assert.equal(curve[curve.indexOf('-t') + 1], String(sourceSpanOf(curveClip)), 'reads source span, not duration');
+  const fc = curve[curve.indexOf('-filter_complex') + 1];
+  assert.ok(fc.startsWith('[0:v]split=12'), fc.slice(0, 60));
+  assert.ok(fc.includes('[rc]reverse,'), 'reverse runs right after the curve graph');
+  const afterRev = fc.slice(fc.indexOf('[rc]reverse,'));
+  assert.ok(afterRev.indexOf('colorkey=') < afterRev.indexOf('geq='), 'key stage before mask stage');
+  assert.ok(fc.endsWith('[vout]'), fc.slice(-40));
+
+  const img = buildClipPrepArgs(makeClip({ kind: 'image', duration: 2 }),
+    { path: 'still.png', w: 320, h: 240, fps: 30 });
+  assert.ok(img.includes('-loop') && img.includes('-t'));
+  assert.ok(img.includes('-vf'));
+  assert.ok(!img.includes('-filter_complex'));
+});
+
+test('buildWavArgs: atempo for constant speed, graph for curves', () => {
+  const plain = buildWavArgs(makeClip({ kind: 'video', duration: 1, speed: 2, reverse: true, volume: 0.5, fadeIn: 0.2, fadeOut: 0.3 }),
+    { path: 'a.wav', out: 'o.wav' });
+  assert.ok(plain.includes('-af'));
+  const af = plain[plain.indexOf('-af') + 1];
+  assert.ok(af.includes('atempo=2'), af);
+  assert.ok(af.includes('areverse'), af);
+  assert.ok(af.includes('volume=0.5'), af);
+  assert.ok(af.includes('afade=t=in:st=0:d=0.2'), af);
+  assert.ok(af.includes('afade=t=out:st=0.7:d=0.3'), af);
+  assert.equal(plain[plain.length - 1], 'o.wav');
+
+  const curveClip = makeClip({ kind: 'video', duration: 3, srcIn: 0, speedCurve: { preset: 'sloMo', points: SLOMO } });
+  const curve = buildWavArgs(curveClip, { path: 'a.wav', out: 'o.wav' });
+  assert.ok(curve.includes('-filter_complex'));
+  assert.equal(curve[curve.indexOf('-t') + 1], String(sourceSpanOf(curveClip)));
+  const fc = curve[curve.indexOf('-filter_complex') + 1];
+  assert.ok(fc.startsWith('[0:a]aresample=48000,asplit=12'), fc.slice(0, 60));
+  assert.ok(fc.includes('asetrate=48000*'), fc.slice(0, 200));
+  assert.ok(fc.includes('concat=n=12:v=0:a=1[ac]'), fc.slice(-80));
+  assert.ok(!fc.includes('atempo'), fc);
+  assert.ok(fc.endsWith('[ao]'), fc.slice(-40));
+  assert.ok(curve.includes('-map') && curve.includes('[ao]'));
+});
